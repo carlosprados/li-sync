@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -16,7 +17,7 @@ const (
 	linkedinTokenURL     = "https://www.linkedin.com/oauth/v2/accessToken"
 	linkedinUserinfoURL  = "https://api.linkedin.com/v2/userinfo"
 	linkedinPostsURL     = "https://api.linkedin.com/rest/posts"
-	linkedinAPIVersion   = "202405"
+	linkedinAPIVersion   = "202605"
 	oauthScopes          = "openid profile w_member_social email"
 )
 
@@ -115,6 +116,91 @@ func ensureFreshTokens(t tokenStore) (tokenStore, error) {
 	return t, nil
 }
 
+// articleOG holds the Open Graph fields scraped from an article page.
+type articleOG struct {
+	Title string
+	Image string
+}
+
+var metaTagRe = regexp.MustCompile(`(?is)<meta\b[^>]*>`)
+
+// extractMetaContent finds the first <meta> tag whose property/name equals key
+// and returns its content attribute. Attribute order is not assumed.
+func extractMetaContent(html, key string) string {
+	keyRe := regexp.MustCompile(`(?i)(?:property|name)\s*=\s*["']` + regexp.QuoteMeta(key) + `["']`)
+	contentRe := regexp.MustCompile(`(?i)content\s*=\s*["']([^"']*)["']`)
+	for _, tag := range metaTagRe.FindAllString(html, -1) {
+		if keyRe.MatchString(tag) {
+			if m := contentRe.FindStringSubmatch(tag); m != nil {
+				return m[1]
+			}
+		}
+	}
+	return ""
+}
+
+// verifyArticleOG is the publish preflight. It guarantees the article page is
+// live (HTTP 200) and exposes a reachable og:image before we let LinkedIn snapshot
+// the link card. LinkedIn freezes the card at post-creation time and caches the OG
+// per URL, so publishing against a 404 or a missing image bakes a broken card that
+// no later fix can repair without deleting the post. Refusing here is what makes
+// that failure impossible.
+func verifyArticleOG(articleURL string) (articleOG, error) {
+	var og articleOG
+	client := &http.Client{Timeout: 15 * time.Second}
+
+	req, _ := http.NewRequest("GET", articleURL, nil)
+	req.Header.Set("User-Agent", "li-sync-preflight/1.0 (+LinkedIn card check)")
+	resp, err := client.Do(req)
+	if err != nil {
+		return og, fmt.Errorf("could not fetch article page %s: %w", articleURL, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // <head> is well within 1MB
+	if resp.StatusCode != http.StatusOK {
+		return og, fmt.Errorf("article page %s returned HTTP %d — not deployed yet? "+
+			"(for future-dated posts the page is dark until its date; publish on the day, "+
+			"not weeks ahead, or LinkedIn caches an empty card)", articleURL, resp.StatusCode)
+	}
+
+	html := string(body)
+	og.Title = extractMetaContent(html, "og:title")
+	og.Image = extractMetaContent(html, "og:image")
+	if og.Image == "" {
+		return og, fmt.Errorf("article page %s exposes no og:image — LinkedIn would render an imageless card", articleURL)
+	}
+	if u, perr := url.Parse(og.Image); perr == nil && !u.IsAbs() {
+		if base, berr := url.Parse(articleURL); berr == nil {
+			og.Image = base.ResolveReference(u).String()
+		}
+	}
+
+	ireq, _ := http.NewRequest("GET", og.Image, nil)
+	ireq.Header.Set("User-Agent", "li-sync-preflight/1.0")
+	ireq.Header.Set("Range", "bytes=0-0")
+	iresp, err := client.Do(ireq)
+	if err != nil {
+		return og, fmt.Errorf("og:image %s is unreachable: %w", og.Image, err)
+	}
+	defer iresp.Body.Close()
+	if iresp.StatusCode < 200 || iresp.StatusCode >= 300 {
+		return og, fmt.Errorf("og:image %s returned HTTP %d — LinkedIn would render an imageless card", og.Image, iresp.StatusCode)
+	}
+	if ct := iresp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "image/") {
+		return og, fmt.Errorf("og:image %s has content-type %q, not an image", og.Image, ct)
+	}
+	return og, nil
+}
+
+// linkedinHeaders sets the auth + versioned REST headers common to every Posts
+// API call.
+func linkedinHeaders(req *http.Request, accessToken string) {
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("LinkedIn-Version", linkedinAPIVersion)
+	req.Header.Set("X-Restli-Protocol-Version", "2.0.0")
+	req.Header.Set("Content-Type", "application/json")
+}
+
 // postToLinkedIn submits a Posts API payload and returns the created post URN
 // (from the x-restli-id response header). Non-2xx responses surface the raw body.
 func postToLinkedIn(accessToken string, payload map[string]any) (string, error) {
@@ -123,10 +209,7 @@ func postToLinkedIn(accessToken string, payload map[string]any) (string, error) 
 		return "", err
 	}
 	req, _ := http.NewRequest("POST", linkedinPostsURL, bytes.NewReader(data))
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("LinkedIn-Version", linkedinAPIVersion)
-	req.Header.Set("X-Restli-Protocol-Version", "2.0.0")
-	req.Header.Set("Content-Type", "application/json")
+	linkedinHeaders(req, accessToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", err
@@ -141,4 +224,57 @@ func postToLinkedIn(accessToken string, payload map[string]any) (string, error) 
 		urn = resp.Header.Get("X-Restli-Id")
 	}
 	return urn, nil
+}
+
+// editLinkedInPostCommentary edits the text (commentary) of an existing post via
+// a PARTIAL_UPDATE. Note: the LinkedIn Posts API only allows editing the
+// commentary — the article card / media of a published post cannot be changed.
+// To replace the card (e.g. after fixing an Open Graph image) you must delete
+// and re-create the post; see `republish`.
+func editLinkedInPostCommentary(accessToken, postURN, commentary string) error {
+	endpoint := linkedinPostsURL + "/" + url.PathEscape(postURN)
+	patch := map[string]any{
+		"patch": map[string]any{
+			"$set": map[string]any{"commentary": commentary},
+		},
+	}
+	data, err := json.Marshal(patch)
+	if err != nil {
+		return err
+	}
+	req, _ := http.NewRequest("POST", endpoint, bytes.NewReader(data))
+	linkedinHeaders(req, accessToken)
+	req.Header.Set("X-RestLi-Method", "PARTIAL_UPDATE")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("LinkedIn API %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// deleteLinkedInPost deletes an existing post by URN. A 404 is treated as
+// success (already gone), so republish is idempotent if the post was removed
+// manually.
+func deleteLinkedInPost(accessToken, postURN string) error {
+	endpoint := linkedinPostsURL + "/" + url.PathEscape(postURN)
+	req, _ := http.NewRequest("DELETE", endpoint, nil)
+	linkedinHeaders(req, accessToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("LinkedIn API %d: %s", resp.StatusCode, string(body))
+	}
+	return nil
 }

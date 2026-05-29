@@ -5,12 +5,14 @@
 // and tell you which posts still need to be scheduled in LinkedIn's composer
 // (manual mode), or publish/schedule posts directly via the LinkedIn API
 // (after a one-time OAuth flow).
+//
+// The CLI is built with Cobra (commands/flags + auto-generated help) and Viper
+// (config file + env binding). See root.go for wiring.
 package main
 
 import (
 	"bufio"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -35,7 +37,8 @@ const (
 )
 
 type post struct {
-	Slug          string
+	Slug          string // directory name — the identifier used in commands and the state file
+	URLSlug       string // front-matter slug if set, else Slug — what Hugo publishes the page under
 	IndexPath     string
 	Title         string
 	Date          time.Time
@@ -48,6 +51,7 @@ type frontMatter struct {
 	Title string    `yaml:"title" toml:"title"`
 	Date  time.Time `yaml:"date" toml:"date"`
 	Draft bool      `yaml:"draft" toml:"draft"`
+	Slug  string    `yaml:"slug" toml:"slug"`
 }
 
 type stateEntry struct {
@@ -60,126 +64,11 @@ type state struct {
 	Posts map[string]stateEntry `yaml:"posts"`
 }
 
-func main() {
-	repoFlag, cmd, args, err := parseGlobalArgs(os.Args[1:])
-	if err != nil {
-		die(err)
-	}
-	if cmd == "" {
-		printUsage(os.Stderr)
-		os.Exit(2)
-	}
-
-	switch cmd {
-	case "-h", "--help", "help":
-		printUsage(os.Stdout)
-		return
-	case "auth":
-		// auth does not touch the Hugo repo
-		if err := runAuth(args); err != nil {
-			die(err)
-		}
-		return
-	}
-
-	root, err := resolveRepoRoot(repoFlag)
-	if err != nil {
-		die(err)
-	}
-
-	switch cmd {
-	case "status":
-		err = runStatus(root, args)
-	case "mark":
-		err = runMark(root, args)
-	case "unmark":
-		err = runUnmark(root, args)
-	case "open":
-		err = runOpen(root, args)
-	case "publish":
-		err = runPublish(root, args)
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
-		printUsage(os.Stderr)
-		os.Exit(2)
-	}
-
-	if err != nil {
-		die(err)
-	}
-}
-
-// parseGlobalArgs strips an optional leading --repo <path> (or --repo=<path>)
-// flag from os.Args before the subcommand. Returns the resolved repo flag
-// value (may be ""), the command, and the remaining args for that command.
-func parseGlobalArgs(argv []string) (repo, cmd string, rest []string, err error) {
-	i := 0
-	for i < len(argv) {
-		a := argv[i]
-		switch {
-		case a == "--repo":
-			if i+1 >= len(argv) {
-				return "", "", nil, errors.New("--repo requires a path argument")
-			}
-			repo = argv[i+1]
-			i += 2
-		case strings.HasPrefix(a, "--repo="):
-			repo = strings.TrimPrefix(a, "--repo=")
-			if repo == "" {
-				return "", "", nil, errors.New("--repo requires a path argument")
-			}
-			i++
-		default:
-			return repo, a, argv[i+1:], nil
-		}
-	}
-	return repo, "", nil, nil
-}
-
-func printUsage(w *os.File) {
-	fmt.Fprintln(w, `li-sync — audit which blog posts are queued/published on LinkedIn
-
-Usage:
-  li-sync [--repo <path>] <command> [args]
-
-Global flags:
-  --repo <path>                           Path to the Hugo site root (the dir
-                                          containing content/posts/). Overrides
-                                          LISYNC_REPO and cwd auto-discovery.
-
-Commands:
-  status                                  List posts and their LinkedIn state
-  mark <slug> --at <RFC3339>              Mark post as scheduled for that datetime
-  mark <slug> --published [--at <date>]   Mark post as already published
-  mark <slug> --note "text"               Attach a note to an existing entry
-  unmark <slug>                           Remove the entry (revert to unscheduled)
-  open <slug>                             Open companion in $EDITOR + LinkedIn composer in browser
-  auth [--client-id ID --client-secret SECRET]
-                                          One-time OAuth flow: authorize the app to post on your behalf.
-                                          Credentials resolved from flags (saved), env vars, app.json, or prompt
-  publish <slug> [--at] [--force] [--dry-run]
-                                          Publish (or schedule) the companion to LinkedIn via API
-  help                                    Show this message
-
-Repo discovery precedence: --repo flag > LISYNC_REPO env > walk up from cwd
-until a directory containing content/posts/ is found.
-
-State is stored in linkedin-status.yaml at the repo root and is versioned in git.
-OAuth tokens are stored locally outside the repo (XDG_CONFIG_HOME/li-sync/).
-Base URL for article previews defaults to https://carlos.enredando.me and can be
-overridden via LISYNC_BASE_URL.`)
-}
-
-func die(err error) {
-	fmt.Fprintf(os.Stderr, "error: %v\n", err)
-	os.Exit(1)
-}
-
 // ---------- repo discovery ----------
 
 // resolveRepoRoot picks the Hugo site root following the precedence:
-// explicit flag, LISYNC_REPO env var, or walk up from cwd looking for
-// content/posts/.
+// explicit value (Viper: --repo flag > LISYNC_REPO env > config file), or
+// walk up from cwd looking for content/posts/.
 func resolveRepoRoot(flagValue string) (string, error) {
 	candidates := []string{flagValue, os.Getenv(repoEnvVar)}
 	for _, c := range candidates {
@@ -245,8 +134,13 @@ func scanPosts(root string) ([]post, error) {
 		}
 		companionPath := filepath.Join(postsDir, slug, companionFile)
 		_, companionErr := os.Stat(companionPath)
+		urlSlug := fm.Slug // Hugo publishes under the front-matter slug when set...
+		if urlSlug == "" {
+			urlSlug = slug // ...otherwise the directory name is the URL segment.
+		}
 		posts = append(posts, post{
 			Slug:          slug,
+			URLSlug:       urlSlug,
 			IndexPath:     indexPath,
 			Title:         fm.Title,
 			Date:          fm.Date,
@@ -441,13 +335,7 @@ func classify(p post, now time.Time, s state) row {
 	return r
 }
 
-func runStatus(root string, args []string) error {
-	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	all := fs.Bool("all", false, "show all rows (default hides future, draft, no-companion)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
+func runStatus(root string, all bool) error {
 	posts, err := scanPosts(root)
 	if err != nil {
 		return err
@@ -464,7 +352,7 @@ func runStatus(root string, args []string) error {
 	for _, p := range posts {
 		r := classify(p, now, s)
 		hideByDefault := r.Status == statusFuture || r.Status == statusDraft || r.Status == statusNoCompanion
-		if !*all && hideByDefault {
+		if !all && hideByDefault {
 			hidden++
 			continue
 		}
@@ -496,7 +384,7 @@ func runStatus(root string, args []string) error {
 	} else {
 		fmt.Fprintf(os.Stdout, "%d post(s) pending LinkedIn scheduling.\n", pending)
 	}
-	if hidden > 0 && !*all {
+	if hidden > 0 && !all {
 		fmt.Fprintf(os.Stdout, "(%d row(s) hidden — future, draft, or no-companion. Use --all to see them.)\n", hidden)
 	}
 	return nil
@@ -504,23 +392,7 @@ func runStatus(root string, args []string) error {
 
 // ---------- mark / unmark ----------
 
-func runMark(root string, args []string) error {
-	if len(args) < 1 || strings.HasPrefix(args[0], "-") {
-		return errors.New("usage: mark <slug> [--at <datetime>] [--published] [--note text]")
-	}
-	slug := args[0]
-
-	fs := flag.NewFlagSet("mark", flag.ContinueOnError)
-	atFlag := fs.String("at", "", "datetime (RFC3339 or YYYY-MM-DD) when the post was/will be published on LinkedIn")
-	publishedFlag := fs.Bool("published", false, "mark as already published (default is scheduled)")
-	noteFlag := fs.String("note", "", "optional free-form note")
-	if err := fs.Parse(args[1:]); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected positional arguments after slug: %v", fs.Args())
-	}
-
+func runMark(root, slug, at string, published bool, note string) error {
 	posts, err := scanPosts(root)
 	if err != nil {
 		return err
@@ -535,20 +407,20 @@ func runMark(root string, args []string) error {
 	}
 
 	entry := s.Posts[slug]
-	if *atFlag != "" {
-		t, err := parseFlexibleTime(*atFlag)
+	if at != "" {
+		t, err := parseFlexibleTime(at)
 		if err != nil {
 			return fmt.Errorf("--at: %w", err)
 		}
 		entry.ScheduledFor = t
 	}
-	if *publishedFlag {
+	if published {
 		entry.Status = "published"
 	} else if entry.Status == "" {
 		entry.Status = "scheduled"
 	}
-	if *noteFlag != "" {
-		entry.Note = *noteFlag
+	if note != "" {
+		entry.Note = note
 	}
 	if entry.Status == "scheduled" && entry.ScheduledFor.IsZero() {
 		return errors.New("scheduled entries need --at <datetime>")
@@ -567,11 +439,7 @@ func runMark(root string, args []string) error {
 	return nil
 }
 
-func runUnmark(root string, args []string) error {
-	if len(args) != 1 {
-		return errors.New("usage: unmark <slug>")
-	}
-	slug := args[0]
+func runUnmark(root, slug string) error {
 	s, err := loadState(root)
 	if err != nil {
 		return err
@@ -589,11 +457,7 @@ func runUnmark(root string, args []string) error {
 
 // ---------- open ----------
 
-func runOpen(root string, args []string) error {
-	if len(args) != 1 {
-		return errors.New("usage: open <slug>")
-	}
-	slug := args[0]
+func runOpen(root, slug string) error {
 	companion := filepath.Join(root, contentPostsDir, slug, companionFile)
 	if _, err := os.Stat(companion); err != nil {
 		return fmt.Errorf("no %s for %q", companionFile, slug)
