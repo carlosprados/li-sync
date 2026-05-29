@@ -41,17 +41,20 @@ type post struct {
 	URLSlug       string // front-matter slug if set, else Slug — what Hugo publishes the page under
 	IndexPath     string
 	Title         string
+	Description   string
 	Date          time.Time
 	Draft         bool
 	HasCompanion  bool
 	CompanionPath string
+	FeaturedPath  string // local path to the featured.* image in the bundle, "" if none
 }
 
 type frontMatter struct {
-	Title string    `yaml:"title" toml:"title"`
-	Date  time.Time `yaml:"date" toml:"date"`
-	Draft bool      `yaml:"draft" toml:"draft"`
-	Slug  string    `yaml:"slug" toml:"slug"`
+	Title       string    `yaml:"title" toml:"title"`
+	Description string    `yaml:"description" toml:"description"`
+	Date        time.Time `yaml:"date" toml:"date"`
+	Draft       bool      `yaml:"draft" toml:"draft"`
+	Slug        string    `yaml:"slug" toml:"slug"`
 }
 
 type stateEntry struct {
@@ -143,10 +146,12 @@ func scanPosts(root string) ([]post, error) {
 			URLSlug:       urlSlug,
 			IndexPath:     indexPath,
 			Title:         fm.Title,
+			Description:   fm.Description,
 			Date:          fm.Date,
 			Draft:         fm.Draft,
 			HasCompanion:  companionErr == nil,
 			CompanionPath: companionPath,
+			FeaturedPath:  findFeaturedImage(filepath.Join(postsDir, slug)),
 		})
 	}
 
@@ -498,6 +503,20 @@ func openURL(url string) error {
 }
 
 // ---------- helpers ----------
+
+// findFeaturedImage returns the path to the bundle's feature image (the file
+// LinkedIn's article card thumbnail is uploaded from), or "" if none. JPEG/PNG
+// only — LinkedIn's Images API does not reliably accept WebP, and the article
+// card needs a real raster thumbnail (the Posts API never scrapes og:image).
+func findFeaturedImage(dir string) string {
+	for _, name := range []string{"featured.jpg", "featured.jpeg", "featured.png", "feature.jpg", "feature.png", "cover.jpg", "cover.png"} {
+		p := filepath.Join(dir, name)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
 
 func slugExists(posts []post, slug string) bool {
 	for _, p := range posts {

@@ -94,16 +94,19 @@ func runPublish(root, slug, at string, force, dryRun, noVerify bool) error {
 		fmt.Fprintf(os.Stderr, "preflight OK: %s is live, og:image %s reachable\n", articleURL, og.Image)
 	}
 
-	payload := buildPostPayload(commentary, articleURL, target.Title, scheduled, publishAt)
-
 	if dryRun {
-		// Author is filled in for real runs only; for dry-run we surface the
-		// placeholder so the user can confirm the structure without auth.
+		payload := buildPostPayload(commentary, articleURL, target.Title, target.Description, "", scheduled, publishAt)
 		payload["author"] = "<urn:li:person:...>  (populated from tokens.json on real run)"
+		if target.FeaturedPath != "" {
+			payload["content"].(map[string]any)["article"].(map[string]any)["thumbnail"] = "<urn:li:image:...>  (uploaded from " + target.FeaturedPath + " on real run)"
+		}
 		encoded, _ := json.MarshalIndent(payload, "", "  ")
 		fmt.Println("--- payload (dry run) ---")
 		fmt.Println(string(encoded))
 		fmt.Println("--- end payload ---")
+		if target.FeaturedPath == "" {
+			fmt.Fprintln(os.Stderr, "warning: no featured image in the bundle — the article card would have NO picture")
+		}
 		if scheduled {
 			fmt.Printf("would schedule for %s\n", formatDateTime(publishAt))
 		} else {
@@ -120,6 +123,22 @@ func runPublish(root, slug, at string, force, dryRun, noVerify bool) error {
 	if err != nil {
 		return err
 	}
+
+	// Upload the article thumbnail. Required for the card to show an image —
+	// the Posts API does not scrape og:image.
+	var thumbnailURN string
+	if target.FeaturedPath != "" {
+		fmt.Fprintf(os.Stderr, "uploading article thumbnail from %s...\n", target.FeaturedPath)
+		thumbnailURN, err = uploadImage(toks.AccessToken, toks.PersonURN, target.FeaturedPath)
+		if err != nil {
+			return fmt.Errorf("upload thumbnail: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "thumbnail uploaded: %s\n", thumbnailURN)
+	} else {
+		fmt.Fprintln(os.Stderr, "warning: no featured image in the bundle — the article card will have NO picture")
+	}
+
+	payload := buildPostPayload(commentary, articleURL, target.Title, target.Description, thumbnailURN, scheduled, publishAt)
 	payload["author"] = toks.PersonURN
 
 	postURN, err := postToLinkedIn(toks.AccessToken, payload)
@@ -236,7 +255,19 @@ func runRepublish(root, slug, at string, noVerify bool) error {
 	return runPublish(root, slug, at, true, false, noVerify)
 }
 
-func buildPostPayload(commentary, articleURL, title string, scheduled bool, publishAt time.Time) map[string]any {
+func buildPostPayload(commentary, articleURL, title, description, thumbnailURN string, scheduled bool, publishAt time.Time) map[string]any {
+	article := map[string]any{
+		"source": articleURL,
+		"title":  title,
+	}
+	if description != "" {
+		article["description"] = description
+	}
+	// The Posts API never scrapes og:image — without an uploaded thumbnail the
+	// article card has no picture. See uploadImage.
+	if thumbnailURN != "" {
+		article["thumbnail"] = thumbnailURN
+	}
 	payload := map[string]any{
 		"commentary": commentary,
 		"visibility": "PUBLIC",
@@ -245,12 +276,7 @@ func buildPostPayload(commentary, articleURL, title string, scheduled bool, publ
 			"targetEntities":                 []string{},
 			"thirdPartyDistributionChannels": []string{},
 		},
-		"content": map[string]any{
-			"article": map[string]any{
-				"source": articleURL,
-				"title":  title,
-			},
-		},
+		"content":                   map[string]any{"article": article},
 		"lifecycleState":            "PUBLISHED",
 		"isReshareDisabledByAuthor": false,
 	}

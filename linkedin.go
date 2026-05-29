@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ const (
 	linkedinTokenURL     = "https://www.linkedin.com/oauth/v2/accessToken"
 	linkedinUserinfoURL  = "https://api.linkedin.com/v2/userinfo"
 	linkedinPostsURL     = "https://api.linkedin.com/rest/posts"
+	linkedinImagesURL    = "https://api.linkedin.com/rest/images"
 	linkedinAPIVersion   = "202605"
 	oauthScopes          = "openid profile w_member_social email"
 )
@@ -224,6 +226,60 @@ func postToLinkedIn(accessToken string, payload map[string]any) (string, error) 
 		urn = resp.Header.Get("X-Restli-Id")
 	}
 	return urn, nil
+}
+
+// uploadImage uploads a local image to LinkedIn's Images API and returns its
+// image URN (urn:li:image:...). This is REQUIRED for article cards to show a
+// picture: the Posts API does not scrape the article URL's og:image, so the
+// thumbnail must be an uploaded asset. Two steps: initializeUpload to get a
+// pre-signed uploadUrl + image URN, then PUT the bytes.
+func uploadImage(accessToken, ownerURN, imagePath string) (string, error) {
+	initBody, err := json.Marshal(map[string]any{
+		"initializeUploadRequest": map[string]any{"owner": ownerURN},
+	})
+	if err != nil {
+		return "", err
+	}
+	req, _ := http.NewRequest("POST", linkedinImagesURL+"?action=initializeUpload", bytes.NewReader(initBody))
+	linkedinHeaders(req, accessToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("images initializeUpload %d: %s", resp.StatusCode, string(body))
+	}
+	var init struct {
+		Value struct {
+			UploadURL string `json:"uploadUrl"`
+			Image     string `json:"image"`
+		} `json:"value"`
+	}
+	if err := json.Unmarshal(body, &init); err != nil {
+		return "", fmt.Errorf("parse initializeUpload response: %w", err)
+	}
+	if init.Value.UploadURL == "" || init.Value.Image == "" {
+		return "", fmt.Errorf("initializeUpload returned no uploadUrl/image: %s", string(body))
+	}
+
+	data, err := os.ReadFile(imagePath)
+	if err != nil {
+		return "", fmt.Errorf("read image %s: %w", imagePath, err)
+	}
+	put, _ := http.NewRequest("PUT", init.Value.UploadURL, bytes.NewReader(data))
+	put.Header.Set("Authorization", "Bearer "+accessToken)
+	putResp, err := http.DefaultClient.Do(put)
+	if err != nil {
+		return "", fmt.Errorf("upload image bytes: %w", err)
+	}
+	defer putResp.Body.Close()
+	putBody, _ := io.ReadAll(putResp.Body)
+	if putResp.StatusCode < 200 || putResp.StatusCode >= 300 {
+		return "", fmt.Errorf("upload image bytes %d: %s", putResp.StatusCode, string(putBody))
+	}
+	return init.Value.Image, nil
 }
 
 // editLinkedInPostCommentary edits the text (commentary) of an existing post via
