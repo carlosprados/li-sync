@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"flag"
 	"fmt"
 	"net"
 	"net/http"
@@ -23,18 +22,12 @@ const (
 	callbackPath = "/callback"
 )
 
-func runAuth(args []string) error {
-	fs := flag.NewFlagSet("auth", flag.ContinueOnError)
-	cliID := fs.String("client-id", "", "LinkedIn app Client ID (persisted to app.json on use)")
-	cliSecret := fs.String("client-secret", "", "LinkedIn app Primary Client Secret (persisted to app.json on use)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("unexpected positional arguments: %v", fs.Args())
-	}
-
-	creds, persist, err := resolveAuthCredentials(*cliID, *cliSecret)
+// runAuthFlow runs the one-time OAuth flow. cliID/cliSecret come from the
+// `auth` command's --client-id/--client-secret flags (which Viper also binds to
+// LINKEDIN_CLIENT_ID/SECRET and the config file); empty values fall through to
+// resolveAuthCredentials' env/file/prompt precedence.
+func runAuthFlow(cliID, cliSecret string) error {
+	creds, persist, err := resolveAuthCredentials(cliID, cliSecret)
 	if err != nil {
 		return err
 	}
