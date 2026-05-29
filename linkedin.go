@@ -287,8 +287,13 @@ func uploadImage(accessToken, ownerURN, imagePath string) (string, error) {
 // commentary — the article card / media of a published post cannot be changed.
 // To replace the card (e.g. after fixing an Open Graph image) you must delete
 // and re-create the post; see `republish`.
+// encodeURN escapes a URN for use as a REST path segment. LinkedIn requires the
+// colons percent-encoded (urn:li:share:1 → urn%3Ali%3Ashare%3A1); url.PathEscape
+// leaves ':' untouched, so use QueryEscape.
+func encodeURN(urn string) string { return url.QueryEscape(urn) }
+
 func editLinkedInPostCommentary(accessToken, postURN, commentary string) error {
-	endpoint := linkedinPostsURL + "/" + url.PathEscape(postURN)
+	endpoint := linkedinPostsURL + "/" + encodeURN(postURN)
 	patch := map[string]any{
 		"patch": map[string]any{
 			"$set": map[string]any{"commentary": commentary},
@@ -317,7 +322,7 @@ func editLinkedInPostCommentary(accessToken, postURN, commentary string) error {
 // success (already gone), so republish is idempotent if the post was removed
 // manually.
 func deleteLinkedInPost(accessToken, postURN string) error {
-	endpoint := linkedinPostsURL + "/" + url.PathEscape(postURN)
+	endpoint := linkedinPostsURL + "/" + encodeURN(postURN)
 	req, _ := http.NewRequest("DELETE", endpoint, nil)
 	linkedinHeaders(req, accessToken)
 	resp, err := http.DefaultClient.Do(req)
