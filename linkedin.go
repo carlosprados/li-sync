@@ -14,13 +14,14 @@ import (
 )
 
 const (
-	linkedinAuthorizeURL = "https://www.linkedin.com/oauth/v2/authorization"
-	linkedinTokenURL     = "https://www.linkedin.com/oauth/v2/accessToken"
-	linkedinUserinfoURL  = "https://api.linkedin.com/v2/userinfo"
-	linkedinPostsURL     = "https://api.linkedin.com/rest/posts"
-	linkedinImagesURL    = "https://api.linkedin.com/rest/images"
-	linkedinAPIVersion   = "202605"
-	oauthScopes          = "openid profile w_member_social email"
+	linkedinAuthorizeURL     = "https://www.linkedin.com/oauth/v2/authorization"
+	linkedinTokenURL         = "https://www.linkedin.com/oauth/v2/accessToken"
+	linkedinUserinfoURL      = "https://api.linkedin.com/v2/userinfo"
+	linkedinPostsURL         = "https://api.linkedin.com/rest/posts"
+	linkedinImagesURL        = "https://api.linkedin.com/rest/images"
+	linkedinSocialActionsURL = "https://api.linkedin.com/rest/socialActions"
+	linkedinAPIVersion       = "202605"
+	oauthScopes              = "openid profile w_member_social email"
 )
 
 type tokenResponse struct {
@@ -280,6 +281,38 @@ func uploadImage(accessToken, ownerURN, imagePath string) (string, error) {
 		return "", fmt.Errorf("upload image bytes %d: %s", putResp.StatusCode, string(putBody))
 	}
 	return init.Value.Image, nil
+}
+
+// commentOnPost adds a comment to a post via the Social Actions API and returns
+// the created comment URN. Used for the "link in first comment" tactic: keep the
+// outbound link out of the post body (which the feed algorithm favours) and drop
+// it in the first comment instead.
+func commentOnPost(accessToken, actorURN, postURN, text string) (string, error) {
+	endpoint := linkedinSocialActionsURL + "/" + encodeURN(postURN) + "/comments"
+	body, err := json.Marshal(map[string]any{
+		"actor":   actorURN,
+		"object":  postURN,
+		"message": map[string]any{"text": text},
+	})
+	if err != nil {
+		return "", err
+	}
+	req, _ := http.NewRequest("POST", endpoint, bytes.NewReader(body))
+	linkedinHeaders(req, accessToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("comment API %d: %s", resp.StatusCode, string(respBody))
+	}
+	urn := resp.Header.Get("x-restli-id")
+	if urn == "" {
+		urn = resp.Header.Get("X-Restli-Id")
+	}
+	return urn, nil
 }
 
 // editLinkedInPostCommentary edits the text (commentary) of an existing post via

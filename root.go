@@ -52,6 +52,7 @@ stored in $XDG_CONFIG_HOME/li-sync/tokens.json, never in the repo.`,
 		newPublishCmd(),
 		newEditCmd(),
 		newRepublishCmd(),
+		newCommentCmd(),
 	)
 	return root
 }
@@ -218,6 +219,33 @@ prompt (secret hidden).`,
 	return cmd
 }
 
+func newCommentCmd() *cobra.Command {
+	var text string
+	cmd := &cobra.Command{
+		Use:   "comment <slug>",
+		Short: "Add a comment to a published post (defaults to the article link)",
+		Long: `Add a comment to an already-published post. With no --text, it posts the
+article URL — the "link in first comment" tactic: LinkedIn's feed favours posts
+without an outbound link in the body, so keeping the link in the first comment
+tends to lift reach. Requires the slug to have a recorded URN.
+
+{{@Display Name}} tokens in --text are expanded to @mentions using the
+"mentions" map from the config file.`,
+		Example: "  li-sync comment cli-built-for-the-ai\n" +
+			"  li-sync comment cli-built-for-the-ai --text \"More detail in the post: https://...\"",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root, err := repoRoot()
+			if err != nil {
+				return err
+			}
+			return runComment(root, args[0], text)
+		},
+	}
+	cmd.Flags().StringVar(&text, "text", "", "comment text (default: the post's article URL)")
+	return cmd
+}
+
 func newEditCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "edit <slug>",
@@ -243,7 +271,7 @@ page's Open Graph image), use "republish" instead.`,
 
 func newRepublishCmd() *cobra.Command {
 	var at string
-	var noVerify bool
+	var noVerify, linkInComment bool
 	cmd := &cobra.Command{
 		Use:   "republish <slug>",
 		Short: "Delete the existing LinkedIn post and create a fresh one (refreshes the card)",
@@ -263,17 +291,18 @@ so a transient deploy gap can't strand you with no post.`,
 			if err != nil {
 				return err
 			}
-			return runRepublish(root, args[0], at, noVerify)
+			return runRepublish(root, args[0], at, noVerify, linkInComment)
 		},
 	}
 	cmd.Flags().StringVar(&at, "at", "", "override publish/schedule datetime for the new post (default: post's front-matter date)")
 	cmd.Flags().BoolVar(&noVerify, "no-verify", false, "skip the article/og:image preflight (not recommended)")
+	cmd.Flags().BoolVar(&linkInComment, "link-in-comment", false, "after re-creating, add the article link as the first comment")
 	return cmd
 }
 
 func newPublishCmd() *cobra.Command {
 	var at string
-	var force, dryRun, noVerify bool
+	var force, dryRun, noVerify, linkInComment bool
 	cmd := &cobra.Command{
 		Use:   "publish <slug>",
 		Short: "Publish or schedule a post's companion to LinkedIn via the API",
@@ -299,12 +328,13 @@ permanently-broken, imageless card. Always run --dry-run first.`,
 			if err != nil {
 				return err
 			}
-			return runPublish(root, args[0], at, force, dryRun, noVerify)
+			return runPublish(root, args[0], at, force, dryRun, noVerify, linkInComment)
 		},
 	}
 	cmd.Flags().StringVar(&at, "at", "", "override publish/schedule datetime (default: post's front-matter date)")
 	cmd.Flags().BoolVar(&force, "force", false, "publish even if the slug already has a state entry")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "run preflight + print payload, no API call (no auth needed)")
 	cmd.Flags().BoolVar(&noVerify, "no-verify", false, "skip the article/og:image preflight (not recommended)")
+	cmd.Flags().BoolVar(&linkInComment, "link-in-comment", false, "after publishing, add the article link as the first comment (reach tactic)")
 	return cmd
 }

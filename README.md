@@ -158,6 +158,8 @@ Publishes (or schedules) the companion to LinkedIn via API.
 - `--dry-run`: run the preflight and print the JSON payload that would be sent
   (with placeholder author URN) without calling the API. Doesn't need `auth`.
 - `--no-verify`: skip the preflight (not recommended).
+- `--link-in-comment`: after publishing, add the article link as the first
+  comment (see `comment` below).
 
 **Preflight (always on unless `--no-verify`).** Before creating the post,
 `li-sync` fetches the article page and refuses to publish unless it returns
@@ -194,7 +196,7 @@ place; use `republish` for that.
 ### `republish`
 
 ```
-li-sync republish <slug> [--at <datetime>] [--no-verify]
+li-sync republish <slug> [--at <datetime>] [--no-verify] [--link-in-comment]
 ```
 
 Deletes the existing LinkedIn post (by its recorded URN) and creates a fresh one
@@ -202,6 +204,36 @@ with the full publish preflight, recording the new URN. This is the only way to
 change a published post's article card — for example after fixing the page's
 `og:image`. The preflight still refuses to re-create the post if the article
 page isn't live, so a transient deploy gap can't strand you with no post.
+
+### `comment`
+
+```
+li-sync comment <slug> [--text "..."]
+```
+
+Adds a comment to an already-published post (requires a recorded URN). With no
+`--text` it posts the **article URL** — the "link in first comment" tactic:
+LinkedIn's feed favours posts without an outbound link in the body, so keeping
+the link in the first comment tends to lift reach. `publish --link-in-comment`
+does this automatically right after publishing.
+
+### Mentions
+
+Write `{{@Display Name}}` anywhere in a `linkedin-post.txt` (or in `comment
+--text`). On publish/edit/comment it expands to LinkedIn mention syntax
+`@[Display Name](urn)` using a `mentions` map resolved by Viper — put it in the
+config file:
+
+```yaml
+# $XDG_CONFIG_HOME/li-sync/config.yaml
+mentions:
+  "Amplía Soluciones": "urn:li:organization:123456"
+  "Antonio Gulli": "urn:li:person:abcd1234"
+```
+
+The text rendered is the name you wrote; the lookup is case-insensitive. An
+unconfigured name is left as plain text with a warning. (You can also write the
+raw `@[Name](urn)` syntax directly — it passes through.)
 
 ## Setup for API mode (one-time)
 
