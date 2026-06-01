@@ -7,9 +7,18 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/spf13/viper"
 )
+
+// linkedinCommentaryMaxUTF16 is LinkedIn's hard limit on post commentary length.
+// LinkedIn counts in UTF-16 code units, so SMP glyphs (the 𝗯𝗼𝗹𝗱 unicode used in
+// companions, emoji) count as 2 each — `wc -m` undercounts them.
+const linkedinCommentaryMaxUTF16 = 3000
+
+// commentaryUTF16Len returns the length LinkedIn measures (UTF-16 code units).
+func commentaryUTF16Len(s string) int { return len(utf16.Encode([]rune(s))) }
 
 var mentionTokenRe = regexp.MustCompile(`\{\{@([^}]+)\}\}`)
 
@@ -102,6 +111,9 @@ func runPublish(root, slug, at string, force, dryRun, noVerify, linkInComment bo
 		return fmt.Errorf("%s is empty", target.CompanionPath)
 	}
 	commentary = applyMentions(commentary)
+	if n := commentaryUTF16Len(commentary); n > linkedinCommentaryMaxUTF16 {
+		return fmt.Errorf("companion %s is %d UTF-16 units, over LinkedIn's %d limit — trim it (LinkedIn counts each bold/emoji glyph as 2, so `wc -m` undercounts)", target.CompanionPath, n, linkedinCommentaryMaxUTF16)
+	}
 
 	articleURL := fmt.Sprintf("%s/posts/%s/", siteBaseURL(), target.URLSlug)
 
@@ -236,6 +248,9 @@ func runEdit(root, slug string) error {
 		return fmt.Errorf("%s is empty", target.CompanionPath)
 	}
 	commentary = applyMentions(commentary)
+	if n := commentaryUTF16Len(commentary); n > linkedinCommentaryMaxUTF16 {
+		return fmt.Errorf("companion %s is %d UTF-16 units, over LinkedIn's %d limit — trim it before editing", target.CompanionPath, n, linkedinCommentaryMaxUTF16)
+	}
 
 	toks, err := loadTokens()
 	if err != nil {
