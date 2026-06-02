@@ -1,15 +1,12 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
 	"time"
 	"unicode/utf16"
-
-	"github.com/spf13/viper"
 )
 
 // linkedinCommentaryMaxUTF16 is LinkedIn's hard limit on post commentary length.
@@ -23,12 +20,12 @@ func commentaryUTF16Len(s string) int { return len(utf16.Encode([]rune(s))) }
 var mentionTokenRe = regexp.MustCompile(`\{\{@([^}]+)\}\}`)
 
 // applyMentions expands {{@Display Name}} tokens in the commentary into LinkedIn
-// mention syntax @[Display Name](urn), looking the name up (case-insensitively)
-// in the Viper "mentions" map (config file: mentions: {"Amplía Soluciones":
-// "urn:li:organization:123"}). Unknown names are left as plain text with a
-// warning, so a typo never ships a literal {{@...}} token.
-func applyMentions(commentary string) string {
-	mentions := viper.GetStringMapString("mentions") // viper lowercases keys
+// mention syntax @[Display Name](urn), looking the name up in the mentions map
+// (config example: mentions: {"Amplía Soluciones": "urn:li:organization:123"}).
+// Lookup keys must be lowercased (Viper's GetStringMapString already does this);
+// matching is therefore case-insensitive. Unknown names are left as plain text
+// with a warning, so a typo never ships a literal {{@...}} token.
+func applyMentions(commentary string, mentions map[string]string) string {
 	return mentionTokenRe.ReplaceAllStringFunc(commentary, func(tok string) string {
 		name := mentionTokenRe.FindStringSubmatch(tok)[1]
 		if urn, ok := mentions[strings.ToLower(strings.TrimSpace(name))]; ok && urn != "" {
@@ -39,27 +36,34 @@ func applyMentions(commentary string) string {
 	})
 }
 
-const defaultSiteBaseURL = "https://carlos.enredando.me"
-
-// siteBaseURL returns the base URL used to build the article preview link.
-// Resolved by Viper: --base-url flag / LISYNC_BASE_URL env / config file /
-// the built-in default, so the tool can serve other Hugo sites without a rebuild.
-func siteBaseURL() string {
-	if v := strings.TrimRight(viper.GetString("base_url"), "/"); v != "" {
-		return v
-	}
-	return defaultSiteBaseURL
+// PublishResult is the outcome of a publish/republish, returned to the caller
+// so presentation lives in the front-end (CLI prints it; a TUI renders it),
+// not in the core logic. On a dry run, Payload holds the JSON that would be
+// sent and URN is empty.
+type PublishResult struct {
+	Slug         string
+	DryRun       bool
+	Scheduled    bool
+	PublishAt    time.Time
+	URN          string
+	Payload      map[string]any // populated only on a dry run
+	FeaturedPath string         // bundle's featured image, "" if none
 }
 
 // runPublish publishes (or schedules) a post's companion to LinkedIn.
 //   - at:       override datetime ("" → use the post's front-matter date)
 //   - force:    publish even if the slug already has a state entry
-//   - dryRun:   run the preflight and print the payload, no API call / no auth
+//   - dryRun:   run the preflight and return the payload, no API call / no auth
 //   - noVerify: skip the preflight (not recommended)
-func runPublish(root, slug, at string, force, dryRun, noVerify bool) error {
+//   - baseURL:  site base URL for the article link (resolved from Viper by the caller)
+//   - mentions: {{@Name}} → URN map (lowercased keys; resolved by the caller)
+//   - rep:      receives progress steps (preflight, upload, schedule warnings)
+//
+// It returns a PublishResult; the caller renders it. No stdout writes happen here.
+func runPublish(root, slug, at string, force, dryRun, noVerify bool, baseURL string, mentions map[string]string, rep Reporter) (PublishResult, error) {
 	posts, err := scanPosts(root)
 	if err != nil {
-		return err
+		return PublishResult{}, err
 	}
 	var target *post
 	for i := range posts {
@@ -69,28 +73,28 @@ func runPublish(root, slug, at string, force, dryRun, noVerify bool) error {
 		}
 	}
 	if target == nil {
-		return fmt.Errorf("no post named %q under %s/", slug, contentPostsDir)
+		return PublishResult{}, fmt.Errorf("no post named %q under %s/", slug, contentPostsDir)
 	}
 	if target.Draft {
-		return fmt.Errorf("%q is marked as draft — publish refused", slug)
+		return PublishResult{}, fmt.Errorf("%q is marked as draft — publish refused", slug)
 	}
 	if !target.HasCompanion {
-		return fmt.Errorf("%q has no %s", slug, companionFile)
+		return PublishResult{}, fmt.Errorf("%q has no %s", slug, companionFile)
 	}
 
 	st, err := loadState(root)
 	if err != nil {
-		return err
+		return PublishResult{}, err
 	}
 	if existing, exists := st.Posts[slug]; exists && !force {
-		return fmt.Errorf("%q already recorded as %s in %s — pass --force to republish", slug, existing.Status, stateFileName)
+		return PublishResult{}, fmt.Errorf("%q already recorded as %s in %s — pass --force to republish", slug, existing.Status, stateFileName)
 	}
 
 	var publishAt time.Time
 	if at != "" {
 		publishAt, err = parseFlexibleTime(at)
 		if err != nil {
-			return fmt.Errorf("--at: %w", err)
+			return PublishResult{}, fmt.Errorf("--at: %w", err)
 		}
 	} else {
 		publishAt = target.Date
@@ -99,32 +103,32 @@ func runPublish(root, slug, at string, force, dryRun, noVerify bool) error {
 	now := time.Now()
 	scheduled := publishAt.After(now)
 	if !scheduled && !publishAt.IsZero() && publishAt.Before(now) {
-		fmt.Fprintf(os.Stderr, "warning: %s is in the past — publishing immediately instead of scheduling\n", formatDateTime(publishAt))
+		rep.Stepf("warning: %s is in the past — publishing immediately instead of scheduling", formatDateTime(publishAt))
 	}
 
 	body, err := os.ReadFile(target.CompanionPath)
 	if err != nil {
-		return fmt.Errorf("read companion: %w", err)
+		return PublishResult{}, fmt.Errorf("read companion: %w", err)
 	}
 	commentary := strings.TrimSpace(string(body))
 	if commentary == "" {
-		return fmt.Errorf("%s is empty", target.CompanionPath)
+		return PublishResult{}, fmt.Errorf("%s is empty", target.CompanionPath)
 	}
-	commentary = applyMentions(commentary)
+	commentary = applyMentions(commentary, mentions)
 	if n := commentaryUTF16Len(commentary); n > linkedinCommentaryMaxUTF16 {
-		return fmt.Errorf("companion %s is %d UTF-16 units, over LinkedIn's %d limit — trim it (LinkedIn counts each bold/emoji glyph as 2, so `wc -m` undercounts)", target.CompanionPath, n, linkedinCommentaryMaxUTF16)
+		return PublishResult{}, fmt.Errorf("companion %s is %d UTF-16 units, over LinkedIn's %d limit — trim it (LinkedIn counts each bold/emoji glyph as 2, so `wc -m` undercounts)", target.CompanionPath, n, linkedinCommentaryMaxUTF16)
 	}
 
-	articleURL := fmt.Sprintf("%s/posts/%s/", siteBaseURL(), target.URLSlug)
+	articleURL := fmt.Sprintf("%s/posts/%s/", baseURL, target.URLSlug)
 
 	// Preflight: never let LinkedIn snapshot a card from a dead page or a missing
 	// image. This is the gate that prevents the "blank card, frozen forever" failure.
 	if !noVerify {
 		og, verr := verifyArticleOG(articleURL)
 		if verr != nil {
-			return fmt.Errorf("preflight failed: %w\n  → fix the page (or wait for deploy), then retry; pass --no-verify only if you know LinkedIn already has a good cache for this URL", verr)
+			return PublishResult{}, fmt.Errorf("preflight failed: %w\n  → fix the page (or wait for deploy), then retry; pass --no-verify only if you know LinkedIn already has a good cache for this URL", verr)
 		}
-		fmt.Fprintf(os.Stderr, "preflight OK: %s is live, og:image %s reachable\n", articleURL, og.Image)
+		rep.Stepf("preflight OK: %s is live, og:image %s reachable", articleURL, og.Image)
 	}
 
 	if dryRun {
@@ -132,43 +136,36 @@ func runPublish(root, slug, at string, force, dryRun, noVerify bool) error {
 		payload["author"] = "<urn:li:person:...>  (populated from tokens.json on real run)"
 		if target.FeaturedPath != "" {
 			payload["content"].(map[string]any)["article"].(map[string]any)["thumbnail"] = "<urn:li:image:...>  (uploaded from " + target.FeaturedPath + " on real run)"
-		}
-		encoded, _ := json.MarshalIndent(payload, "", "  ")
-		fmt.Println("--- payload (dry run) ---")
-		fmt.Println(string(encoded))
-		fmt.Println("--- end payload ---")
-		if target.FeaturedPath == "" {
-			fmt.Fprintln(os.Stderr, "warning: no featured image in the bundle — the article card would have NO picture")
-		}
-		if scheduled {
-			fmt.Printf("would schedule for %s\n", formatDateTime(publishAt))
 		} else {
-			fmt.Println("would publish immediately")
+			rep.Stepf("warning: no featured image in the bundle — the article card would have NO picture")
 		}
-		return nil
+		return PublishResult{
+			Slug: slug, DryRun: true, Scheduled: scheduled, PublishAt: publishAt,
+			Payload: payload, FeaturedPath: target.FeaturedPath,
+		}, nil
 	}
 
 	toks, err := loadTokens()
 	if err != nil {
-		return err
+		return PublishResult{}, err
 	}
 	toks, err = ensureFreshTokens(toks)
 	if err != nil {
-		return err
+		return PublishResult{}, err
 	}
 
 	// Upload the article thumbnail. Required for the card to show an image —
 	// the Posts API does not scrape og:image.
 	var thumbnailURN string
 	if target.FeaturedPath != "" {
-		fmt.Fprintf(os.Stderr, "uploading article thumbnail from %s...\n", target.FeaturedPath)
+		rep.Stepf("uploading article thumbnail from %s...", target.FeaturedPath)
 		thumbnailURN, err = uploadImage(toks.AccessToken, toks.PersonURN, target.FeaturedPath)
 		if err != nil {
-			return fmt.Errorf("upload thumbnail: %w", err)
+			return PublishResult{}, fmt.Errorf("upload thumbnail: %w", err)
 		}
-		fmt.Fprintf(os.Stderr, "thumbnail uploaded: %s\n", thumbnailURN)
+		rep.Stepf("thumbnail uploaded: %s", thumbnailURN)
 	} else {
-		fmt.Fprintln(os.Stderr, "warning: no featured image in the bundle — the article card will have NO picture")
+		rep.Stepf("warning: no featured image in the bundle — the article card will have NO picture")
 	}
 
 	payload := buildPostPayload(commentary, articleURL, target.Title, target.Description, thumbnailURN, scheduled, publishAt)
@@ -176,7 +173,7 @@ func runPublish(root, slug, at string, force, dryRun, noVerify bool) error {
 
 	postURN, err := postToLinkedIn(toks.AccessToken, payload)
 	if err != nil {
-		return err
+		return PublishResult{}, err
 	}
 
 	entry := stateEntry{Note: postURN}
@@ -189,21 +186,19 @@ func runPublish(root, slug, at string, force, dryRun, noVerify bool) error {
 	}
 	st.Posts[slug] = entry
 	if err := saveState(root, st); err != nil {
-		return fmt.Errorf("post published (URN %s) but writing %s failed: %w", postURN, stateFileName, err)
+		return PublishResult{}, fmt.Errorf("post published (URN %s) but writing %s failed: %w", postURN, stateFileName, err)
 	}
 
-	if scheduled {
-		fmt.Printf("scheduled %s for %s (URN: %s)\n", slug, formatDateTime(publishAt), postURN)
-	} else {
-		fmt.Printf("published %s (URN: %s)\n", slug, postURN)
-	}
-	return nil
+	return PublishResult{
+		Slug: slug, Scheduled: scheduled, PublishAt: publishAt,
+		URN: postURN, FeaturedPath: target.FeaturedPath,
+	}, nil
 }
 
 // runEdit updates the commentary (text) of an already-published post from its
 // current linkedin-post.txt. The article card/media cannot be changed this way —
 // use `republish` for that.
-func runEdit(root, slug string) error {
+func runEdit(root, slug string, mentions map[string]string) error {
 	posts, err := scanPosts(root)
 	if err != nil {
 		return err
@@ -239,7 +234,7 @@ func runEdit(root, slug string) error {
 	if commentary == "" {
 		return fmt.Errorf("%s is empty", target.CompanionPath)
 	}
-	commentary = applyMentions(commentary)
+	commentary = applyMentions(commentary, mentions)
 	if n := commentaryUTF16Len(commentary); n > linkedinCommentaryMaxUTF16 {
 		return fmt.Errorf("companion %s is %d UTF-16 units, over LinkedIn's %d limit — trim it before editing", target.CompanionPath, n, linkedinCommentaryMaxUTF16)
 	}
@@ -264,32 +259,32 @@ func runEdit(root, slug string) error {
 // is the only way to change a published post's article card (e.g. after fixing
 // the page's Open Graph image): editing commentary in place cannot. The new
 // post runs the full preflight and gets a new URN recorded in the state file.
-func runRepublish(root, slug, at string, noVerify bool) error {
+func runRepublish(root, slug, at string, noVerify bool, baseURL string, mentions map[string]string, rep Reporter) (PublishResult, error) {
 	st, err := loadState(root)
 	if err != nil {
-		return err
+		return PublishResult{}, err
 	}
 	entry, ok := st.Posts[slug]
 	if !ok || entry.Note == "" {
-		return fmt.Errorf("%q has no recorded LinkedIn URN in %s — use `publish` instead", slug, stateFileName)
+		return PublishResult{}, fmt.Errorf("%q has no recorded LinkedIn URN in %s — use `publish` instead", slug, stateFileName)
 	}
 
 	toks, err := loadTokens()
 	if err != nil {
-		return err
+		return PublishResult{}, err
 	}
 	toks, err = ensureFreshTokens(toks)
 	if err != nil {
-		return err
+		return PublishResult{}, err
 	}
 
 	if err := deleteLinkedInPost(toks.AccessToken, entry.Note); err != nil {
-		return fmt.Errorf("delete existing post %s: %w", entry.Note, err)
+		return PublishResult{}, fmt.Errorf("delete existing post %s: %w", entry.Note, err)
 	}
-	fmt.Fprintf(os.Stderr, "deleted old post %s — creating a fresh one...\n", entry.Note)
+	rep.Stepf("deleted old post %s — creating a fresh one...", entry.Note)
 
 	// force=true overwrites the stale state entry with the new URN.
-	return runPublish(root, slug, at, true, false, noVerify)
+	return runPublish(root, slug, at, true, false, noVerify, baseURL, mentions, rep)
 }
 
 func buildPostPayload(commentary, articleURL, title, description, thumbnailURN string, scheduled bool, publishAt time.Time) map[string]any {

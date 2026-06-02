@@ -10,6 +10,14 @@ LinkedIn API. It is a **sidecar** that operates on an *external* Hugo repo — i
 is not the blog repo itself. Read `README.md` for the full user-facing command
 reference; this file covers what isn't obvious from the source.
 
+**Design principle (load-bearing): the CLI is first-class and must stay fully
+scriptable and non-interactive** — an automated agent must be able to drive
+every operation through flags/stdout/stderr with no TTY. Any TUI (planned, on
+Bubble Tea) is strictly **additive** (a separate `ui` command), never a
+replacement. This is why the core logic is being decoupled from presentation
+(see `buildStatusReport`, `Reporter`, `PublishResult`): so the CLI and a TUI can
+share one core without either becoming the only way in.
+
 ## Commands
 
 This repo uses **Task** (`go-task`); see `Taskfile.yml`. Prefer it over raw `go`
@@ -28,9 +36,12 @@ task run -- <args># build then run, e.g. `task run -- status --all`
 The equivalent raw commands still work (`go build -o li-sync .`, `go vet ./...`,
 `gofmt -l .`, `go mod tidy`).
 
-There are **no tests** in the repo (`*_test.go` absent). If you add functionality
-worth covering, propose tests for `parseFrontMatter`, `parseFlexibleTime`,
-`classify`, and `resolveAuthCredentials` — the pure logic with branching.
+Tests live alongside the source (`*_test.go`, `package main`) and cover the pure
+logic: `parseFrontMatter`, `parseFlexibleTime`, `classify`, `buildStatusReport`,
+`applyMentions`, `commentaryUTF16Len`, `resolveAuthCredentials` (non-prompt
+branches), state round-trip, and `resolveRepoRoot`. Run with `task test`. The
+HTTP/OAuth paths (`linkedin.go`, `auth.go`'s browser flow) are not unit-tested —
+they'd need an httptest server; add that if you touch them.
 
 Releases are tag-driven: pushing a `v*` tag triggers `.github/workflows/release.yml`,
 which runs GoReleaser (cross-compiles linux/darwin/windows × amd64/arm64). No
@@ -49,7 +60,9 @@ binding):
   env vars (`LISYNC_*`, `LINKEDIN_*`), and an optional `config.yaml` in the
   config dir. `repoRoot()` resolves the Hugo root via Viper.
 - **`main.go`** — domain logic only: **repo discovery**, post scanning, state
-  file I/O, and the `run*` helpers behind `status`/`mark`/`unmark`/`open`. A
+  file I/O, and the `run*` helpers behind `status`/`mark`/`unmark`/`open`.
+  `buildStatusReport(root, all, now)` returns the status rows + counts as data
+  (`StatusReport`) with an injectable `now`; `runStatus` just prints it. A
   post's `URLSlug` (front-matter `slug:` or dir name) is what builds the
   article URL.
 - **`auth.go`** — the one-time OAuth flow (`runAuthFlow`): credential
@@ -62,7 +75,14 @@ binding):
   API" product grant the app doesn't have (returns 403); the link-in-first-comment
   step is done manually in the UI.
 - **`publish.go`** — `runPublish` (+ preflight gate), `runEdit`,
-  `runRepublish`, `buildPostPayload`, and `siteBaseURL` (Viper).
+  `runRepublish`, `buildPostPayload`. The publish/republish funcs are
+  presentation-free: they take `baseURL`/`mentions` as params (resolved from
+  Viper by `root.go`), emit progress via a `Reporter`, and **return a
+  `PublishResult`** instead of printing. `root.go`'s commands render it. No
+  stdout writes happen in the core publish path.
+- **`reporter.go`** — the `Reporter` seam: progress steps from long-running ops.
+  The CLI binds `writerReporter` to stderr (verbatim with the old output); a
+  future TUI would turn each `Stepf` into a `tea.Msg`.
 - **`config.go`** — persistence of app credentials + OAuth tokens to the config dir.
 
 ### Two state stores — keep them distinct

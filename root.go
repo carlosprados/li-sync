@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -83,6 +84,52 @@ func initConfig(root *cobra.Command) {
 // repoRoot resolves the Hugo site root from Viper (flag/env/config) or discovery.
 func repoRoot() (string, error) {
 	return resolveRepoRoot(viper.GetString("repo"))
+}
+
+const defaultSiteBaseURL = "https://carlos.enredando.me"
+
+// siteBaseURL resolves the article base URL from Viper (--base-url flag /
+// LISYNC_BASE_URL env / config file), falling back to the built-in default so
+// the tool can serve other Hugo sites without a rebuild.
+func siteBaseURL() string {
+	if v := strings.TrimRight(viper.GetString("base_url"), "/"); v != "" {
+		return v
+	}
+	return defaultSiteBaseURL
+}
+
+// configuredMentions returns the {{@Name}} → URN map from Viper. Viper
+// lowercases the keys, which is what applyMentions expects for its
+// case-insensitive lookup.
+func configuredMentions() map[string]string {
+	return viper.GetStringMapString("mentions")
+}
+
+// cliReporter sends progress steps to stderr, reproducing the exact progress
+// output li-sync printed before the publish logic was decoupled from the CLI.
+func cliReporter() Reporter { return newWriterReporter(os.Stderr) }
+
+// printPublishResult renders a PublishResult to stdout, matching the CLI output
+// the publish/republish commands produced before they returned data instead of
+// printing inline.
+func printPublishResult(res PublishResult) {
+	if res.DryRun {
+		encoded, _ := json.MarshalIndent(res.Payload, "", "  ")
+		fmt.Println("--- payload (dry run) ---")
+		fmt.Println(string(encoded))
+		fmt.Println("--- end payload ---")
+		if res.Scheduled {
+			fmt.Printf("would schedule for %s\n", formatDateTime(res.PublishAt))
+		} else {
+			fmt.Println("would publish immediately")
+		}
+		return
+	}
+	if res.Scheduled {
+		fmt.Printf("scheduled %s for %s (URN: %s)\n", res.Slug, formatDateTime(res.PublishAt), res.URN)
+	} else {
+		fmt.Printf("published %s (URN: %s)\n", res.Slug, res.URN)
+	}
 }
 
 func newStatusCmd() *cobra.Command {
@@ -236,7 +283,7 @@ page's Open Graph image), use "republish" instead.`,
 			if err != nil {
 				return err
 			}
-			return runEdit(root, args[0])
+			return runEdit(root, args[0], configuredMentions())
 		},
 	}
 }
@@ -263,7 +310,12 @@ so a transient deploy gap can't strand you with no post.`,
 			if err != nil {
 				return err
 			}
-			return runRepublish(root, args[0], at, noVerify)
+			res, err := runRepublish(root, args[0], at, noVerify, siteBaseURL(), configuredMentions(), cliReporter())
+			if err != nil {
+				return err
+			}
+			printPublishResult(res)
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&at, "at", "", "override publish/schedule datetime for the new post (default: post's front-matter date)")
@@ -299,7 +351,12 @@ permanently-broken, imageless card. Always run --dry-run first.`,
 			if err != nil {
 				return err
 			}
-			return runPublish(root, args[0], at, force, dryRun, noVerify)
+			res, err := runPublish(root, args[0], at, force, dryRun, noVerify, siteBaseURL(), configuredMentions(), cliReporter())
+			if err != nil {
+				return err
+			}
+			printPublishResult(res)
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&at, "at", "", "override publish/schedule datetime (default: post's front-matter date)")
