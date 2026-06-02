@@ -225,6 +225,23 @@ change a published post's article card — for example after fixing the page's
 `og:image`. The preflight still refuses to re-create the post if the article
 page isn't live, so a transient deploy gap can't strand you with no post.
 
+### `tui`
+
+```
+li-sync tui
+```
+
+Opens an interactive terminal dashboard: a navigable table of every post with
+its LinkedIn state, plus a live preview of the selected post's companion.
+
+This is an **additive, read-only** front-end. It performs no API calls and
+writes nothing — every mutating action (publish, mark, edit, …) stays in the CLI
+subcommands above, which remain fully scriptable without a terminal. The `tui`
+command requires a TTY; in a non-interactive context (CI, an automated agent) it
+exits with a clear error, so use the subcommands there.
+
+Keys: `↑`/`↓` move · `a` toggle all/actionable · `r` reload · `q` quit.
+
 ### Mentions
 
 Write `{{@Display Name}}` anywhere in a `linkedin-post.txt`. On publish/edit it

@@ -53,6 +53,7 @@ stored in $XDG_CONFIG_HOME/li-sync/tokens.json, never in the repo.`,
 		newPublishCmd(),
 		newEditCmd(),
 		newRepublishCmd(),
+		newTUICmd(),
 	)
 	return root
 }
@@ -321,6 +322,31 @@ so a transient deploy gap can't strand you with no post.`,
 	cmd.Flags().StringVar(&at, "at", "", "override publish/schedule datetime for the new post (default: post's front-matter date)")
 	cmd.Flags().BoolVar(&noVerify, "no-verify", false, "skip the article/og:image preflight (not recommended)")
 	return cmd
+}
+
+func newTUICmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "tui",
+		Short: "Interactive read-only dashboard for browsing post/LinkedIn state",
+		Long: `Open an interactive terminal dashboard: a navigable table of every post with
+its LinkedIn state, plus a live preview of the selected post's companion.
+
+This is an ADDITIVE front-end and is strictly read-only — it performs no API
+calls and writes nothing. Every mutating action (publish, mark, edit, …) lives
+in the CLI subcommands, which stay fully scriptable without a terminal. The tui
+command requires a TTY; automated callers should use the subcommands instead.
+
+Keys: ↑/↓ move · a toggle all/actionable · r reload · q quit.`,
+		Example: "  li-sync tui\n  li-sync --repo ~/blog tui",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root, err := repoRoot()
+			if err != nil {
+				return err
+			}
+			return runTUI(root, siteBaseURL())
+		},
+	}
 }
 
 func newPublishCmd() *cobra.Command {

@@ -13,7 +13,7 @@ reference; this file covers what isn't obvious from the source.
 **Design principle (load-bearing): the CLI is first-class and must stay fully
 scriptable and non-interactive** — an automated agent must be able to drive
 every operation through flags/stdout/stderr with no TTY. Any TUI (planned, on
-Bubble Tea) is strictly **additive** (a separate `ui` command), never a
+Bubble Tea) is strictly **additive** (a separate `tui` command), never a
 replacement. This is why the core logic is being decoupled from presentation
 (see `buildStatusReport`, `Reporter`, `PublishResult`): so the CLI and a TUI can
 share one core without either becoming the only way in.
