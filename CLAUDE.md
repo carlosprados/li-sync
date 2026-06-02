@@ -81,8 +81,16 @@ binding):
   `PublishResult`** instead of printing. `root.go`'s commands render it. No
   stdout writes happen in the core publish path.
 - **`reporter.go`** — the `Reporter` seam: progress steps from long-running ops.
-  The CLI binds `writerReporter` to stderr (verbatim with the old output); a
-  future TUI would turn each `Stepf` into a `tea.Msg`.
+  The CLI binds `writerReporter` to stderr (verbatim with the old output); the
+  TUI binds a `chanReporter` that turns each `Stepf` into a `tea.Msg`.
+- **`tui.go`** — the `tui` command's Bubble Tea program (`uiModel`). Read-only
+  browsing plus write actions (publish/edit/republish/unmark) that call the same
+  core funcs behind a `y/n` confirm, run in a `tea.Cmd` goroutine, and stream
+  progress over a channel. Lives in `package main`, not a separate package — the
+  TUI shares the core directly, it doesn't need an extracted boundary. State
+  machine: `modeBrowse → modeConfirm → modeRunning → modeResult`.
+  `runEdit` returns the URN and `unmarkPost` does the state mutation without
+  printing, so the TUI never writes to stdout.
 - **`config.go`** — persistence of app credentials + OAuth tokens to the config dir.
 
 ### Two state stores — keep them distinct

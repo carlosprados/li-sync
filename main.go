@@ -461,7 +461,9 @@ func runMark(root, slug, at string, published bool, note string) error {
 	return nil
 }
 
-func runUnmark(root, slug string) error {
+// unmarkPost removes a post's entry from the state file. No printing — callers
+// (CLI and TUI) report the outcome themselves.
+func unmarkPost(root, slug string) error {
 	s, err := loadState(root)
 	if err != nil {
 		return err
@@ -470,7 +472,11 @@ func runUnmark(root, slug string) error {
 		return fmt.Errorf("no entry for %q in %s", slug, stateFileName)
 	}
 	delete(s.Posts, slug)
-	if err := saveState(root, s); err != nil {
+	return saveState(root, s)
+}
+
+func runUnmark(root, slug string) error {
+	if err := unmarkPost(root, slug); err != nil {
 		return err
 	}
 	fmt.Printf("removed %s from %s\n", slug, stateFileName)

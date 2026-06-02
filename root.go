@@ -284,7 +284,12 @@ page's Open Graph image), use "republish" instead.`,
 			if err != nil {
 				return err
 			}
-			return runEdit(root, args[0], configuredMentions())
+			urn, err := runEdit(root, args[0], configuredMentions())
+			if err != nil {
+				return err
+			}
+			fmt.Printf("edited %s commentary (URN: %s)\n", args[0], urn)
+			return nil
 		},
 	}
 }

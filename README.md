@@ -232,15 +232,23 @@ li-sync tui
 ```
 
 Opens an interactive terminal dashboard: a navigable table of every post with
-its LinkedIn state, plus a live preview of the selected post's companion.
+its LinkedIn state, a live preview of the selected post's companion, and the
+common write actions behind an explicit confirmation.
 
-This is an **additive, read-only** front-end. It performs no API calls and
-writes nothing — every mutating action (publish, mark, edit, …) stays in the CLI
-subcommands above, which remain fully scriptable without a terminal. The `tui`
-command requires a TTY; in a non-interactive context (CI, an automated agent) it
-exits with a clear error, so use the subcommands there.
+This is an **additive** front-end — it never becomes the only way to do
+anything. Every action it offers calls the *same* core functions as the CLI
+subcommands, which remain the primary, fully scriptable path. The `tui` command
+requires a TTY; in a non-interactive context (CI, an automated agent) it exits
+with a clear error, so use the subcommands there.
 
-Keys: `↑`/`↓` move · `a` toggle all/actionable · `r` reload · `q` quit.
+Keys:
+- `↑`/`↓` move · `a` toggle all/actionable · `r` reload · `q` quit
+- `d` dry-run · `p` publish · `e` edit · `R` republish · `u` unmark
+
+Write actions (`p`/`e`/`R`/`u`) prompt for `y`/`n` confirmation first, then run
+asynchronously with live progress (preflight, thumbnail upload, …) and show the
+result. `d` (dry-run) needs no auth and runs the preflight without posting.
+Scheduling with a custom datetime (`mark --at`, `publish --at`) stays CLI-only.
 
 ### Mentions
 

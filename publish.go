@@ -196,12 +196,13 @@ func runPublish(root, slug, at string, force, dryRun, noVerify bool, baseURL str
 }
 
 // runEdit updates the commentary (text) of an already-published post from its
-// current linkedin-post.txt. The article card/media cannot be changed this way —
-// use `republish` for that.
-func runEdit(root, slug string, mentions map[string]string) error {
+// current linkedin-post.txt and returns the post URN. The article card/media
+// cannot be changed this way — use `republish` for that. The caller renders the
+// result (CLI prints it; the TUI shows it), so nothing is written to stdout here.
+func runEdit(root, slug string, mentions map[string]string) (string, error) {
 	posts, err := scanPosts(root)
 	if err != nil {
-		return err
+		return "", err
 	}
 	var target *post
 	for i := range posts {
@@ -211,48 +212,47 @@ func runEdit(root, slug string, mentions map[string]string) error {
 		}
 	}
 	if target == nil {
-		return fmt.Errorf("no post named %q under %s/", slug, contentPostsDir)
+		return "", fmt.Errorf("no post named %q under %s/", slug, contentPostsDir)
 	}
 	if !target.HasCompanion {
-		return fmt.Errorf("%q has no %s", slug, companionFile)
+		return "", fmt.Errorf("%q has no %s", slug, companionFile)
 	}
 
 	st, err := loadState(root)
 	if err != nil {
-		return err
+		return "", err
 	}
 	entry, ok := st.Posts[slug]
 	if !ok || entry.Note == "" {
-		return fmt.Errorf("%q has no recorded LinkedIn URN in %s — publish it first", slug, stateFileName)
+		return "", fmt.Errorf("%q has no recorded LinkedIn URN in %s — publish it first", slug, stateFileName)
 	}
 
 	body, err := os.ReadFile(target.CompanionPath)
 	if err != nil {
-		return fmt.Errorf("read companion: %w", err)
+		return "", fmt.Errorf("read companion: %w", err)
 	}
 	commentary := strings.TrimSpace(string(body))
 	if commentary == "" {
-		return fmt.Errorf("%s is empty", target.CompanionPath)
+		return "", fmt.Errorf("%s is empty", target.CompanionPath)
 	}
 	commentary = applyMentions(commentary, mentions)
 	if n := commentaryUTF16Len(commentary); n > linkedinCommentaryMaxUTF16 {
-		return fmt.Errorf("companion %s is %d UTF-16 units, over LinkedIn's %d limit — trim it before editing", target.CompanionPath, n, linkedinCommentaryMaxUTF16)
+		return "", fmt.Errorf("companion %s is %d UTF-16 units, over LinkedIn's %d limit — trim it before editing", target.CompanionPath, n, linkedinCommentaryMaxUTF16)
 	}
 
 	toks, err := loadTokens()
 	if err != nil {
-		return err
+		return "", err
 	}
 	toks, err = ensureFreshTokens(toks)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	if err := editLinkedInPostCommentary(toks.AccessToken, entry.Note, commentary); err != nil {
-		return err
+		return "", err
 	}
-	fmt.Printf("edited %s commentary (URN: %s)\n", slug, entry.Note)
-	return nil
+	return entry.Note, nil
 }
 
 // runRepublish deletes the existing LinkedIn post and creates a fresh one. This
