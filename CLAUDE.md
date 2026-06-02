@@ -12,12 +12,21 @@ reference; this file covers what isn't obvious from the source.
 
 ## Commands
 
+This repo uses **Task** (`go-task`); see `Taskfile.yml`. Prefer it over raw `go`
+invocations:
+
 ```
-go build -o li-sync .        # build (binary is gitignored at repo root)
-go vet ./...                 # static checks
-gofmt -l .                   # list unformatted files (-w to fix)
-go mod tidy                  # tidy deps (also run by goreleaser pre-build hook)
+task build        # build the li-sync binary (gitignored at repo root)
+task vet          # go vet ./...
+task fmt          # gofmt -w .   (task fmt:check fails if anything is unformatted)
+task tidy         # go mod tidy && go mod verify
+task test         # go test ./...
+task check        # fmt:check + vet + build + test — the pre-push gate
+task run -- <args># build then run, e.g. `task run -- status --all`
 ```
+
+The equivalent raw commands still work (`go build -o li-sync .`, `go vet ./...`,
+`gofmt -l .`, `go mod tidy`).
 
 There are **no tests** in the repo (`*_test.go` absent). If you add functionality
 worth covering, propose tests for `parseFrontMatter`, `parseFlexibleTime`,
@@ -35,7 +44,8 @@ binding):
 
 - **`root.go`** — `main()`, the Cobra root command, every subcommand
   constructor (`newStatusCmd`, `newPublishCmd`, `newEditCmd`, `newRepublishCmd`,
-  …), and Viper wiring (`initConfig`): persistent `--repo`/`--base-url` flags,
+  `newMarkCmd`, `newUnmarkCmd`, `newOpenCmd`, `newAuthCmd`), and Viper wiring
+  (`initConfig`): persistent `--repo`/`--base-url` flags,
   env vars (`LISYNC_*`, `LINKEDIN_*`), and an optional `config.yaml` in the
   config dir. `repoRoot()` resolves the Hugo root via Viper.
 - **`main.go`** — domain logic only: **repo discovery**, post scanning, state
@@ -45,8 +55,12 @@ binding):
 - **`auth.go`** — the one-time OAuth flow (`runAuthFlow`): credential
   resolution, a local callback HTTP server on `:8765`, CSRF `state` check.
 - **`linkedin.go`** — LinkedIn HTTP client: token exchange/refresh, userinfo,
-  the Posts API calls (create / `PARTIAL_UPDATE` commentary / delete), and the
-  publish **preflight** (`verifyArticleOG`). All API constants live here.
+  the Posts API calls (create / `PARTIAL_UPDATE` commentary / delete), image
+  upload (`uploadImage`, for the card thumbnail), and the publish **preflight**
+  (`verifyArticleOG`). All API constants live here. NOTE: there is deliberately
+  no comment/Social Actions support — that API needs a "Community Management
+  API" product grant the app doesn't have (returns 403); the link-in-first-comment
+  step is done manually in the UI.
 - **`publish.go`** — `runPublish` (+ preflight gate), `runEdit`,
   `runRepublish`, `buildPostPayload`, and `siteBaseURL` (Viper).
 - **`config.go`** — persistence of app credentials + OAuth tokens to the config dir.
@@ -83,9 +97,11 @@ companion. The companion's full text becomes the LinkedIn `commentary`. The
 
 `publish` sends to the LinkedIn Posts API (`linkedin.go`). If the post's `date:`
 (or `--at`) is in the future it sets `publishedAt` (epoch millis) to **schedule**;
-if past it publishes immediately with a warning. The article card image is *not*
-uploaded — LinkedIn renders it from the `og:*` meta tags of
-`<LISYNC_BASE_URL>/posts/<slug>/` (default `https://carlos.enredando.me`,
+if past it publishes immediately with a warning. The Posts API does **not** scrape
+`og:image`, so the card thumbnail is uploaded from the bundle's
+`featured.{jpg,png}` via the Images API (`uploadImage`) and set as
+`content.article.thumbnail` (JPEG/PNG only — WebP is rejected). The article link
+is `<LISYNC_BASE_URL>/posts/<slug>/` (default `https://carlos.enredando.me`,
 override via `LISYNC_BASE_URL`). `--dry-run` prints the payload with a
 placeholder author URN and needs no auth.
 

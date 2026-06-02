@@ -33,3 +33,9 @@ go.work.sum
 
 # Built binary
 /li-sync
+
+# GoReleaser output
+/dist/
+
+# go-task fingerprint cache
+/.task/
