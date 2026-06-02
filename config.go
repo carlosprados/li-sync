@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -107,6 +108,36 @@ func saveTokens(t tokenStore) error {
 		return err
 	}
 	return os.WriteFile(tokensPath(), data, 0o600)
+}
+
+// lastRepoPath is a tiny single-line file in the config dir recording the last
+// Hugo repo opened in the TUI. It is kept separate from config.yaml on purpose:
+// it is tool-managed state (like tokens.json), and writing it must never clobber
+// the user's hand-written config. It is consulted ONLY by the `tui` command — the
+// CLI subcommands' repo resolution (resolveRepoRoot) is deliberately unaffected,
+// so scripted/automated use has no hidden default.
+func lastRepoPath() string {
+	d, _ := configDir()
+	return filepath.Join(d, "last_repo")
+}
+
+func loadLastRepo() string {
+	data, err := os.ReadFile(lastRepoPath())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func saveLastRepo(path string) error {
+	d, err := configDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(d, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(lastRepoPath(), []byte(path+"\n"), 0o644)
 }
 
 func loadTokens() (tokenStore, error) {

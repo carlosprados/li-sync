@@ -348,7 +348,18 @@ Keys: ↑/↓ move · a toggle all/actionable · r reload · q quit.`,
 			// A missing/unresolvable repo is fine here: the TUI opens a
 			// directory picker so you can choose the Hugo root interactively.
 			root, _ := repoRoot()
-			return runTUI(root, siteBaseURL())
+			last := loadLastRepo()
+			// With nothing explicit, fall back to the last repo opened in the
+			// TUI (if it's still a valid Hugo root).
+			if root == "" && last != "" {
+				if r, err := resolveRepoRoot(last); err == nil {
+					root = r
+				}
+			}
+			if root != "" {
+				_ = saveLastRepo(root) // remember what we opened (best-effort)
+			}
+			return runTUI(root, siteBaseURL(), last)
 		},
 	}
 }

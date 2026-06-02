@@ -21,7 +21,7 @@ func TestUIModelRender(t *testing.T) {
 		{slug: "future-post", date: "2026-12-01"},
 	})
 
-	m, err := newUIModel(root, "https://example.com")
+	m, err := newUIModel(root, "https://example.com", "")
 	if err != nil {
 		t.Fatalf("newUIModel: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestUIModelToggleAll(t *testing.T) {
 		{slug: "future-post", date: "2026-12-01"},
 	})
 
-	m, err := newUIModel(root, "https://example.com")
+	m, err := newUIModel(root, "https://example.com", "")
 	if err != nil {
 		t.Fatalf("newUIModel: %v", err)
 	}
@@ -73,7 +73,7 @@ func key(r rune) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []run
 
 // With no repo, the TUI opens the directory picker instead of failing.
 func TestUIRepoPickerStart(t *testing.T) {
-	m, err := newUIModel("", "https://example.com")
+	m, err := newUIModel("", "https://example.com", "")
 	if err != nil {
 		t.Fatalf("newUIModel(\"\"): %v", err)
 	}
@@ -97,7 +97,7 @@ func TestUIChangeRepoKey(t *testing.T) {
 	}{
 		{slug: "past-missing", date: "2026-01-01"},
 	})
-	m, err := newUIModel(root, "https://example.com")
+	m, err := newUIModel(root, "https://example.com", "")
 	if err != nil {
 		t.Fatalf("newUIModel: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestUIConfirmFlow(t *testing.T) {
 	}{
 		{slug: "past-missing", date: "2026-01-01"},
 	})
-	m, err := newUIModel(root, "https://example.com")
+	m, err := newUIModel(root, "https://example.com", "")
 	if err != nil {
 		t.Fatalf("newUIModel: %v", err)
 	}

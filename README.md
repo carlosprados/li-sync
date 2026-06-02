@@ -389,6 +389,7 @@ Edit by hand only if you know what you're doing — easier to use `mark`/`unmark
 | Hugo site root             | `--repo`, `LISYNC_REPO`, cwd walk-up                            | —                             |
 | Article base URL           | `LISYNC_BASE_URL`                                               | `https://carlos.enredando.me` |
 | OAuth config/tokens dir    | `LI_SYNC_CONFIG_DIR`                                            | `$XDG_CONFIG_HOME/li-sync/`   |
+| Last repo opened in `tui`  | tool-managed `last_repo` file in the config dir (`tui` only)    | —                             |
 | LinkedIn app credentials   | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`, or `app.json`   | —                             |
 
 ## Limitations
