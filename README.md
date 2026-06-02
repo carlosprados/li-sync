@@ -225,6 +225,38 @@ change a published post's article card — for example after fixing the page's
 `og:image`. The preflight still refuses to re-create the post if the article
 page isn't live, so a transient deploy gap can't strand you with no post.
 
+### `tui`
+
+```
+li-sync tui
+```
+
+Opens an interactive terminal dashboard: a navigable table of every post with
+its LinkedIn state, a live preview of the selected post's companion, and the
+common write actions behind an explicit confirmation.
+
+This is an **additive** front-end — it never becomes the only way to do
+anything. Every action it offers calls the *same* core functions as the CLI
+subcommands, which remain the primary, fully scriptable path. The `tui` command
+requires a TTY; in a non-interactive context (CI, an automated agent) it exits
+with a clear error, so use the subcommands there.
+
+If no repo is resolved (no `--repo`/`LISYNC_REPO` and `content/posts/` isn't in
+an ancestor of the cwd), the TUI opens a **directory picker** so you can choose
+your Hugo site root interactively, instead of erroring out. Press `c` from the
+table to switch repos at any time. A picked directory is validated — it must
+contain `content/posts/` — and rejected inline if not.
+
+Keys:
+- `↑`/`↓` move · `a` toggle all/actionable · `r` reload · `c` change repo · `q` quit
+- `d` dry-run · `p` publish · `e` edit · `R` republish · `u` unmark
+- picker: `↑`/`↓` move · `enter` choose dir · `h`/`esc` up a level · `ctrl+c` quit
+
+Write actions (`p`/`e`/`R`/`u`) prompt for `y`/`n` confirmation first, then run
+asynchronously with live progress (preflight, thumbnail upload, …) and show the
+result. `d` (dry-run) needs no auth and runs the preflight without posting.
+Scheduling with a custom datetime (`mark --at`, `publish --at`) stays CLI-only.
+
 ### Mentions
 
 Write `{{@Display Name}}` anywhere in a `linkedin-post.txt`. On publish/edit it

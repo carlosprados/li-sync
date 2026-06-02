@@ -340,36 +340,53 @@ func classify(p post, now time.Time, s state) row {
 	return r
 }
 
-func runStatus(root string, all bool) error {
+// StatusReport is the computed view of every post's LinkedIn state: the rows to
+// display plus the summary counts. Pure data, no presentation — runStatus prints
+// it and a future TUI renders it into a table.
+type StatusReport struct {
+	Rows    []row
+	Pending int // posts in MISSING state (need scheduling)
+	Hidden  int // rows filtered out when all == false
+}
+
+// buildStatusReport scans the repo, classifies every post against the state file
+// at the given instant, and returns the rows plus counts. `now` is a parameter
+// (not time.Now()) so the classification is deterministic and testable.
+func buildStatusReport(root string, all bool, now time.Time) (StatusReport, error) {
 	posts, err := scanPosts(root)
 	if err != nil {
-		return err
+		return StatusReport{}, err
 	}
 	s, err := loadState(root)
 	if err != nil {
-		return err
+		return StatusReport{}, err
 	}
 
-	now := time.Now()
-	rows := make([]row, 0, len(posts))
-	pending := 0
-	hidden := 0
+	rep := StatusReport{Rows: make([]row, 0, len(posts))}
 	for _, p := range posts {
 		r := classify(p, now, s)
 		hideByDefault := r.Status == statusFuture || r.Status == statusDraft || r.Status == statusNoCompanion
 		if !all && hideByDefault {
-			hidden++
+			rep.Hidden++
 			continue
 		}
 		if r.Status == statusMissing {
-			pending++
+			rep.Pending++
 		}
-		rows = append(rows, r)
+		rep.Rows = append(rep.Rows, r)
+	}
+	return rep, nil
+}
+
+func runStatus(root string, all bool) error {
+	report, err := buildStatusReport(root, all, time.Now())
+	if err != nil {
+		return err
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "SLUG\tPOST DATE\tLINKEDIN STATE\tACTION")
-	for _, r := range rows {
+	for _, r := range report.Rows {
 		stateCol := r.Status.label()
 		if r.StateInfo != "" {
 			stateCol += "  " + r.StateInfo
@@ -384,13 +401,13 @@ func runStatus(root string, all bool) error {
 	w.Flush()
 
 	fmt.Fprintln(os.Stdout)
-	if pending == 0 {
+	if report.Pending == 0 {
 		fmt.Fprintln(os.Stdout, "All caught up. No posts pending LinkedIn scheduling.")
 	} else {
-		fmt.Fprintf(os.Stdout, "%d post(s) pending LinkedIn scheduling.\n", pending)
+		fmt.Fprintf(os.Stdout, "%d post(s) pending LinkedIn scheduling.\n", report.Pending)
 	}
-	if hidden > 0 && !all {
-		fmt.Fprintf(os.Stdout, "(%d row(s) hidden — future, draft, or no-companion. Use --all to see them.)\n", hidden)
+	if report.Hidden > 0 && !all {
+		fmt.Fprintf(os.Stdout, "(%d row(s) hidden — future, draft, or no-companion. Use --all to see them.)\n", report.Hidden)
 	}
 	return nil
 }
@@ -444,7 +461,9 @@ func runMark(root, slug, at string, published bool, note string) error {
 	return nil
 }
 
-func runUnmark(root, slug string) error {
+// unmarkPost removes a post's entry from the state file. No printing — callers
+// (CLI and TUI) report the outcome themselves.
+func unmarkPost(root, slug string) error {
 	s, err := loadState(root)
 	if err != nil {
 		return err
@@ -453,7 +472,11 @@ func runUnmark(root, slug string) error {
 		return fmt.Errorf("no entry for %q in %s", slug, stateFileName)
 	}
 	delete(s.Posts, slug)
-	if err := saveState(root, s); err != nil {
+	return saveState(root, s)
+}
+
+func runUnmark(root, slug string) error {
+	if err := unmarkPost(root, slug); err != nil {
 		return err
 	}
 	fmt.Printf("removed %s from %s\n", slug, stateFileName)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -52,6 +53,7 @@ stored in $XDG_CONFIG_HOME/li-sync/tokens.json, never in the repo.`,
 		newPublishCmd(),
 		newEditCmd(),
 		newRepublishCmd(),
+		newTUICmd(),
 	)
 	return root
 }
@@ -83,6 +85,52 @@ func initConfig(root *cobra.Command) {
 // repoRoot resolves the Hugo site root from Viper (flag/env/config) or discovery.
 func repoRoot() (string, error) {
 	return resolveRepoRoot(viper.GetString("repo"))
+}
+
+const defaultSiteBaseURL = "https://carlos.enredando.me"
+
+// siteBaseURL resolves the article base URL from Viper (--base-url flag /
+// LISYNC_BASE_URL env / config file), falling back to the built-in default so
+// the tool can serve other Hugo sites without a rebuild.
+func siteBaseURL() string {
+	if v := strings.TrimRight(viper.GetString("base_url"), "/"); v != "" {
+		return v
+	}
+	return defaultSiteBaseURL
+}
+
+// configuredMentions returns the {{@Name}} → URN map from Viper. Viper
+// lowercases the keys, which is what applyMentions expects for its
+// case-insensitive lookup.
+func configuredMentions() map[string]string {
+	return viper.GetStringMapString("mentions")
+}
+
+// cliReporter sends progress steps to stderr, reproducing the exact progress
+// output li-sync printed before the publish logic was decoupled from the CLI.
+func cliReporter() Reporter { return newWriterReporter(os.Stderr) }
+
+// printPublishResult renders a PublishResult to stdout, matching the CLI output
+// the publish/republish commands produced before they returned data instead of
+// printing inline.
+func printPublishResult(res PublishResult) {
+	if res.DryRun {
+		encoded, _ := json.MarshalIndent(res.Payload, "", "  ")
+		fmt.Println("--- payload (dry run) ---")
+		fmt.Println(string(encoded))
+		fmt.Println("--- end payload ---")
+		if res.Scheduled {
+			fmt.Printf("would schedule for %s\n", formatDateTime(res.PublishAt))
+		} else {
+			fmt.Println("would publish immediately")
+		}
+		return
+	}
+	if res.Scheduled {
+		fmt.Printf("scheduled %s for %s (URN: %s)\n", res.Slug, formatDateTime(res.PublishAt), res.URN)
+	} else {
+		fmt.Printf("published %s (URN: %s)\n", res.Slug, res.URN)
+	}
 }
 
 func newStatusCmd() *cobra.Command {
@@ -236,7 +284,12 @@ page's Open Graph image), use "republish" instead.`,
 			if err != nil {
 				return err
 			}
-			return runEdit(root, args[0])
+			urn, err := runEdit(root, args[0], configuredMentions())
+			if err != nil {
+				return err
+			}
+			fmt.Printf("edited %s commentary (URN: %s)\n", args[0], urn)
+			return nil
 		},
 	}
 }
@@ -263,12 +316,41 @@ so a transient deploy gap can't strand you with no post.`,
 			if err != nil {
 				return err
 			}
-			return runRepublish(root, args[0], at, noVerify)
+			res, err := runRepublish(root, args[0], at, noVerify, siteBaseURL(), configuredMentions(), cliReporter())
+			if err != nil {
+				return err
+			}
+			printPublishResult(res)
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&at, "at", "", "override publish/schedule datetime for the new post (default: post's front-matter date)")
 	cmd.Flags().BoolVar(&noVerify, "no-verify", false, "skip the article/og:image preflight (not recommended)")
 	return cmd
+}
+
+func newTUICmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "tui",
+		Short: "Interactive read-only dashboard for browsing post/LinkedIn state",
+		Long: `Open an interactive terminal dashboard: a navigable table of every post with
+its LinkedIn state, plus a live preview of the selected post's companion.
+
+This is an ADDITIVE front-end and is strictly read-only — it performs no API
+calls and writes nothing. Every mutating action (publish, mark, edit, …) lives
+in the CLI subcommands, which stay fully scriptable without a terminal. The tui
+command requires a TTY; automated callers should use the subcommands instead.
+
+Keys: ↑/↓ move · a toggle all/actionable · r reload · q quit.`,
+		Example: "  li-sync tui\n  li-sync --repo ~/blog tui",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// A missing/unresolvable repo is fine here: the TUI opens a
+			// directory picker so you can choose the Hugo root interactively.
+			root, _ := repoRoot()
+			return runTUI(root, siteBaseURL())
+		},
+	}
 }
 
 func newPublishCmd() *cobra.Command {
@@ -299,7 +381,12 @@ permanently-broken, imageless card. Always run --dry-run first.`,
 			if err != nil {
 				return err
 			}
-			return runPublish(root, args[0], at, force, dryRun, noVerify)
+			res, err := runPublish(root, args[0], at, force, dryRun, noVerify, siteBaseURL(), configuredMentions(), cliReporter())
+			if err != nil {
+				return err
+			}
+			printPublishResult(res)
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&at, "at", "", "override publish/schedule datetime (default: post's front-matter date)")
