@@ -133,7 +133,7 @@ type uiModel struct {
 	pickErr string
 }
 
-func newUIModel(root, baseURL string) (uiModel, error) {
+func newUIModel(root, baseURL, pickerHint string) (uiModel, error) {
 	m := uiModel{root: root, baseURL: baseURL, mentions: configuredMentions(), previewLines: 8}
 	cols := []table.Column{
 		{Title: "SLUG", Width: 34},
@@ -156,10 +156,11 @@ func newUIModel(root, baseURL string) (uiModel, error) {
 	fp.SetHeight(15)
 	m.picker = fp
 
-	// No usable repo yet → open the picker instead of failing.
+	// No usable repo yet → open the picker instead of failing, starting near the
+	// last repo opened (pickerHint) when there is one.
 	if root == "" {
 		m.mode = modePickRepo
-		m.picker.CurrentDirectory = startDir("")
+		m.picker.CurrentDirectory = startDir(pickerHint)
 		return m, nil
 	}
 	if err := m.reload(); err != nil {
@@ -303,6 +304,7 @@ func (m uiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if e := m.reload(); e != nil {
 				m.err = e
 			} else {
+				_ = saveLastRepo(root) // remember this choice for next launch
 				m.mode = modeBrowse
 				m.layout()
 			}
@@ -594,8 +596,8 @@ func truncateLines(s string, max int) string {
 
 // runTUI launches the interactive dashboard. It requires a terminal; automated
 // callers should use the CLI subcommands instead.
-func runTUI(root, baseURL string) error {
-	m, err := newUIModel(root, baseURL)
+func runTUI(root, baseURL, pickerHint string) error {
+	m, err := newUIModel(root, baseURL, pickerHint)
 	if err != nil {
 		return err
 	}
