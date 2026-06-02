@@ -1,10 +1,13 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // The Bubble Tea program needs a TTY, but the model itself (build + View) is
@@ -70,6 +73,40 @@ func TestUIModelToggleAll(t *testing.T) {
 }
 
 func key(r rune) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}} }
+
+// A long companion (lines that wrap many times) must not blow the view past the
+// terminal height — that's the bug that pushed the table header off-screen.
+func TestUIViewFixedHeight(t *testing.T) {
+	root := t.TempDir()
+	mk := func(slug, companion string) {
+		dir := filepath.Join(root, "content", "posts", slug)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(dir, "index.md"),
+			"---\ntitle: \""+slug+"\"\ndate: 2026-01-01\ndraft: false\n---\nbody\n")
+		writeFile(t, filepath.Join(dir, "linkedin-post.txt"), companion)
+	}
+	long := strings.Repeat("a very long line that wraps across the terminal several times over and over. ", 30)
+	mk("a-short", "tiny companion")
+	mk("b-long", long+"\n"+long+"\n"+long+"\n"+long)
+
+	const H = 24
+	m, err := newUIModel(root, "https://example.com", "")
+	if err != nil {
+		t.Fatalf("newUIModel: %v", err)
+	}
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: H})
+
+	if got := lipgloss.Height(model.View()); got > H {
+		t.Errorf("view height %d exceeds terminal height %d", got, H)
+	}
+	// Moving the selection (onto the long companion) must not change that.
+	moved, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if got := lipgloss.Height(moved.View()); got > H {
+		t.Errorf("view height after moving = %d, exceeds terminal height %d", got, H)
+	}
+}
 
 // With no repo, the TUI opens the directory picker instead of failing.
 func TestUIRepoPickerStart(t *testing.T) {
