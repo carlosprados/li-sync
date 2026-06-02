@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/filepicker"
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -51,6 +53,7 @@ const (
 	modeConfirm
 	modeRunning
 	modeResult
+	modePickRepo
 )
 
 type actionKind int
@@ -125,6 +128,9 @@ type uiModel struct {
 	result    string
 	resultErr bool
 	stepCh    chan string
+
+	picker  filepicker.Model
+	pickErr string
 }
 
 func newUIModel(root, baseURL string) (uiModel, error) {
@@ -141,10 +147,48 @@ func newUIModel(root, baseURL string) (uiModel, error) {
 	s.Selected = s.Selected.Bold(true).Foreground(lipgloss.Color("231")).Background(lipgloss.Color("63"))
 	t.SetStyles(s)
 	m.tbl = t
+
+	fp := filepicker.New()
+	fp.DirAllowed = true // we select a directory (the Hugo root), not a file
+	fp.FileAllowed = false
+	fp.ShowSize = false
+	fp.AutoHeight = false
+	fp.SetHeight(15)
+	m.picker = fp
+
+	// No usable repo yet → open the picker instead of failing.
+	if root == "" {
+		m.mode = modePickRepo
+		m.picker.CurrentDirectory = startDir("")
+		return m, nil
+	}
 	if err := m.reload(); err != nil {
 		return m, err
 	}
 	return m, nil
+}
+
+// startDir picks a sensible directory for the repo picker to open in: the parent
+// of a hint path if given, else the current working directory.
+func startDir(hint string) string {
+	if hint != "" {
+		if abs, err := filepath.Abs(filepath.Dir(hint)); err == nil {
+			return abs
+		}
+	}
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return "."
+}
+
+// enterPickMode switches to the repo picker, opening at the hint's parent dir.
+func (m uiModel) enterPickMode(hint string) (tea.Model, tea.Cmd) {
+	m.mode = modePickRepo
+	m.pickErr = ""
+	m.picker.CurrentDirectory = startDir(hint)
+	m.layout()
+	return m, m.picker.Init()
 }
 
 // reload re-scans the repo and the state file and rebuilds the table.
@@ -178,6 +222,7 @@ func (m *uiModel) layout() {
 	preview := min(max(m.height/3, 5), 14)
 	m.previewLines = preview
 	m.tbl.SetHeight(max(m.height-preview-6, 3))
+	m.picker.SetHeight(max(m.height-6, 3))
 }
 
 func (m uiModel) selectedSlug() (string, bool) {
@@ -188,9 +233,17 @@ func (m uiModel) selectedSlug() (string, bool) {
 	return sel[0], true
 }
 
-func (m uiModel) Init() tea.Cmd { return nil }
+func (m uiModel) Init() tea.Cmd {
+	if m.mode == modePickRepo {
+		return m.picker.Init()
+	}
+	return nil
+}
 
 func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.mode == modePickRepo {
+		return m.updatePicker(msg)
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -223,6 +276,39 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	return m, nil
+}
+
+// updatePicker drives the repo file picker. On selecting a directory it is
+// validated as a Hugo root (must contain content/posts/); a valid pick loads
+// the table and switches to browse, an invalid one shows an inline error.
+func (m uiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+		m.layout()
+		return m, nil
+	case tea.KeyMsg:
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+	}
+
+	var cmd tea.Cmd
+	m.picker, cmd = m.picker.Update(msg)
+	if ok, path := m.picker.DidSelectFile(msg); ok {
+		if root, err := resolveRepoRoot(path); err != nil {
+			m.pickErr = err.Error()
+		} else {
+			m.root, m.pickErr = root, ""
+			if e := m.reload(); e != nil {
+				m.err = e
+			} else {
+				m.mode = modeBrowse
+				m.layout()
+			}
+		}
+	}
+	return m, cmd
 }
 
 func (m uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -266,6 +352,8 @@ func (m uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.err = err
 			}
 			return m, nil
+		case "c":
+			return m.enterPickMode(m.root)
 		case "d":
 			if slug, ok := m.selectedSlug(); ok {
 				return m.startAction(pendingAction{kind: actionDryRun, slug: slug})
@@ -388,6 +476,9 @@ func (m uiModel) View() string {
 	if m.err != nil {
 		return uiErrStyle.Render("error: "+m.err.Error()) + "\n\npress q to quit\n"
 	}
+	if m.mode == modePickRepo {
+		return m.pickerView()
+	}
 	title := uiTitleStyle.Render("li-sync · " + m.root)
 	box := uiPreviewBox.Width(max(m.width-2, 20)).Render(m.bottomContent())
 	footer := uiFooterStyle.Render(m.footerText())
@@ -435,10 +526,22 @@ func (m uiModel) footerText() string {
 		return uiFooterStyle.Render("press any key to return to the table")
 	default:
 		return fmt.Sprintf(
-			"%d shown · %d pending · %d hidden · view:%s\n[↑↓] move · [d]ry-run [p]ublish [e]dit [R]epublish [u]nmark · [a]ll [r]eload [q]uit",
+			"%d shown · %d pending · %d hidden · view:%s\n[↑↓] move · [d]ry-run [p]ublish [e]dit [R]epublish [u]nmark · [a]ll [r]eload [c]hange-repo [q]uit",
 			len(m.report.Rows), m.report.Pending, m.report.Hidden, scope,
 		)
 	}
+}
+
+func (m uiModel) pickerView() string {
+	var b strings.Builder
+	b.WriteString(uiTitleStyle.Render("li-sync · select your Hugo site root") + "\n\n")
+	b.WriteString(uiFooterStyle.Render("pick a directory that contains content/posts/   ·   [enter] choose   [h/esc] up   [ctrl+c] quit") + "\n")
+	if m.pickErr != "" {
+		b.WriteString(uiErrStyle.Render("✗ "+m.pickErr) + "\n")
+	}
+	b.WriteString("\n" + m.picker.View() + "\n")
+	b.WriteString(uiFooterStyle.Render("in: " + m.picker.CurrentDirectory))
+	return b.String()
 }
 
 func (m uiModel) previewText() string {

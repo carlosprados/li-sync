@@ -345,10 +345,9 @@ Keys: ↑/↓ move · a toggle all/actionable · r reload · q quit.`,
 		Example: "  li-sync tui\n  li-sync --repo ~/blog tui",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			root, err := repoRoot()
-			if err != nil {
-				return err
-			}
+			// A missing/unresolvable repo is fine here: the TUI opens a
+			// directory picker so you can choose the Hugo root interactively.
+			root, _ := repoRoot()
 			return runTUI(root, siteBaseURL())
 		},
 	}

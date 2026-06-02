@@ -71,6 +71,43 @@ func TestUIModelToggleAll(t *testing.T) {
 
 func key(r rune) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}} }
 
+// With no repo, the TUI opens the directory picker instead of failing.
+func TestUIRepoPickerStart(t *testing.T) {
+	m, err := newUIModel("", "https://example.com")
+	if err != nil {
+		t.Fatalf("newUIModel(\"\"): %v", err)
+	}
+	if m.mode != modePickRepo {
+		t.Fatalf("mode = %v, want modePickRepo when no repo is given", m.mode)
+	}
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	view := sized.View()
+	if !strings.Contains(view, "Hugo site root") {
+		t.Errorf("picker view missing the prompt:\n%s", view)
+	}
+}
+
+// From the table, "c" reopens the repo picker without losing the model.
+func TestUIChangeRepoKey(t *testing.T) {
+	root := newTestRepo(t, []struct {
+		slug        string
+		date        string
+		draft       bool
+		noCompanion bool
+	}{
+		{slug: "past-missing", date: "2026-01-01"},
+	})
+	m, err := newUIModel(root, "https://example.com")
+	if err != nil {
+		t.Fatalf("newUIModel: %v", err)
+	}
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	changed, _ := sized.Update(key('c'))
+	if changed.(uiModel).mode != modePickRepo {
+		t.Errorf("after 'c', mode = %v, want modePickRepo", changed.(uiModel).mode)
+	}
+}
+
 // The confirm state machine must gate every write action and never launch one
 // without an explicit "y".
 func TestUIConfirmFlow(t *testing.T) {

@@ -241,9 +241,16 @@ subcommands, which remain the primary, fully scriptable path. The `tui` command
 requires a TTY; in a non-interactive context (CI, an automated agent) it exits
 with a clear error, so use the subcommands there.
 
+If no repo is resolved (no `--repo`/`LISYNC_REPO` and `content/posts/` isn't in
+an ancestor of the cwd), the TUI opens a **directory picker** so you can choose
+your Hugo site root interactively, instead of erroring out. Press `c` from the
+table to switch repos at any time. A picked directory is validated — it must
+contain `content/posts/` — and rejected inline if not.
+
 Keys:
-- `↑`/`↓` move · `a` toggle all/actionable · `r` reload · `q` quit
+- `↑`/`↓` move · `a` toggle all/actionable · `r` reload · `c` change repo · `q` quit
 - `d` dry-run · `p` publish · `e` edit · `R` republish · `u` unmark
+- picker: `↑`/`↓` move · `enter` choose dir · `h`/`esc` up a level · `ctrl+c` quit
 
 Write actions (`p`/`e`/`R`/`u`) prompt for `y`/`n` confirmation first, then run
 asynchronously with live progress (preflight, thumbnail upload, …) and show the

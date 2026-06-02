@@ -88,7 +88,10 @@ binding):
   core funcs behind a `y/n` confirm, run in a `tea.Cmd` goroutine, and stream
   progress over a channel. Lives in `package main`, not a separate package — the
   TUI shares the core directly, it doesn't need an extracted boundary. State
-  machine: `modeBrowse → modeConfirm → modeRunning → modeResult`.
+  machine: `modeBrowse → modeConfirm → modeRunning → modeResult`, plus
+  `modePickRepo` (a `bubbles/filepicker` to choose the Hugo root when none is
+  resolved, or via `c`; the pick is validated through `resolveRepoRoot`). The
+  `tui` command therefore does NOT fail on a missing repo — it opens the picker.
   `runEdit` returns the URN and `unmarkPost` does the state mutation without
   printing, so the TUI never writes to stdout.
 - **`config.go`** — persistence of app credentials + OAuth tokens to the config dir.
