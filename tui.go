@@ -289,7 +289,7 @@ func (m uiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layout()
 		return m, nil
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" {
+		if k := msg.String(); k == "q" || k == "ctrl+c" {
 			return m, tea.Quit
 		}
 	}
@@ -315,20 +315,22 @@ func (m uiModel) updatePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
-	if key == "ctrl+c" {
+	// q (and ctrl+c) always quit the app — except while an op is running, where
+	// input is ignored so a stray key can't abandon an in-flight publish.
+	if (key == "q" || key == "ctrl+c") && m.mode != modeRunning {
 		return m, tea.Quit
 	}
 
 	switch m.mode {
 	case modeResult:
-		if key == "q" {
-			return m, tea.Quit
-		}
-		m.mode = modeBrowse
+		m.mode = modeBrowse // any other key dismisses the result
 		return m, nil
 
 	case modeRunning:
-		return m, nil // input ignored while an op is in flight
+		if key == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil // other input ignored while an op is in flight
 
 	case modeConfirm:
 		switch key {
@@ -341,7 +343,7 @@ func (m uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case modeBrowse:
 		switch key {
-		case "q", "esc":
+		case "esc":
 			return m, tea.Quit
 		case "a":
 			m.all = !m.all
@@ -482,7 +484,15 @@ func (m uiModel) View() string {
 		return m.pickerView()
 	}
 	title := uiTitleStyle.Render("li-sync · " + m.root)
-	box := uiPreviewBox.Width(max(m.width-2, 20)).Render(m.bottomContent())
+	// Fixed-height box: Width makes long companion lines wrap INSIDE the panel
+	// (not into the terminal), Height pads short content, and MaxHeight hard-clips
+	// tall content. Without this the panel grows with the selected post and shoves
+	// the table header off-screen as you move through the list.
+	box := uiPreviewBox.
+		Width(max(m.width-4, 16)).
+		Height(m.previewLines).
+		MaxHeight(m.previewLines + 2).
+		Render(m.bottomContent())
 	footer := uiFooterStyle.Render(m.footerText())
 	return lipgloss.JoinVertical(lipgloss.Left, title, m.tbl.View(), box, footer)
 }
@@ -537,7 +547,7 @@ func (m uiModel) footerText() string {
 func (m uiModel) pickerView() string {
 	var b strings.Builder
 	b.WriteString(uiTitleStyle.Render("li-sync · select your Hugo site root") + "\n\n")
-	b.WriteString(uiFooterStyle.Render("pick a directory that contains content/posts/   ·   [enter] choose   [h/esc] up   [ctrl+c] quit") + "\n")
+	b.WriteString(uiFooterStyle.Render("pick a directory that contains content/posts/   ·   [enter] choose   [h/esc] up   [q] quit") + "\n")
 	if m.pickErr != "" {
 		b.WriteString(uiErrStyle.Render("✗ "+m.pickErr) + "\n")
 	}
