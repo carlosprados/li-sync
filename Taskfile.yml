@@ -1,0 +1,87 @@
+# Taskfile for li-sync — https://taskfile.dev
+# Install go-task: `go install github.com/go-task/task/v3/cmd/task@latest`
+# Run `task` (or `task --list`) to see available tasks.
+version: '3'
+
+vars:
+  BINARY: li-sync
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  build:
+    desc: Build the li-sync binary at the repo root
+    cmds:
+      - go build -o {{.BINARY}} .
+    sources:
+      - '*.go'
+      - go.mod
+      - go.sum
+    generates:
+      - '{{.BINARY}}'
+
+  install:
+    desc: Install li-sync into GOBIN (go install)
+    cmds:
+      - go install .
+
+  run:
+    desc: 'Build and run with args, e.g. `task run -- status --all`'
+    deps: [build]
+    cmds:
+      - './{{.BINARY}} {{.CLI_ARGS}}'
+
+  tidy:
+    desc: Tidy and verify module dependencies
+    cmds:
+      - go mod tidy
+      - go mod verify
+
+  fmt:
+    desc: Format all Go sources in place
+    cmds:
+      - gofmt -w .
+
+  fmt:check:
+    desc: Fail if any Go source is not gofmt-clean
+    cmds:
+      - |
+        unformatted="$(gofmt -l .)"
+        if [ -n "$unformatted" ]; then
+          echo "These files are not gofmt-clean:"
+          echo "$unformatted"
+          exit 1
+        fi
+
+  vet:
+    desc: Run go vet static checks
+    cmds:
+      - go vet ./...
+
+  test:
+    desc: Run the test suite
+    cmds:
+      - go test ./...
+
+  check:
+    desc: Run all quality gates (fmt check, vet, build, test) — use before pushing
+    cmds:
+      - task: fmt:check
+      - task: vet
+      - task: build
+      - task: test
+
+  release:snapshot:
+    desc: Build a local snapshot release with GoReleaser (no publish; needs goreleaser)
+    cmds:
+      - goreleaser release --snapshot --clean
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -f {{.BINARY}}
+      - rm -rf dist

@@ -56,7 +56,7 @@ func siteBaseURL() string {
 //   - force:    publish even if the slug already has a state entry
 //   - dryRun:   run the preflight and print the payload, no API call / no auth
 //   - noVerify: skip the preflight (not recommended)
-func runPublish(root, slug, at string, force, dryRun, noVerify, linkInComment bool) error {
+func runPublish(root, slug, at string, force, dryRun, noVerify bool) error {
 	posts, err := scanPosts(root)
 	if err != nil {
 		return err
@@ -192,14 +192,6 @@ func runPublish(root, slug, at string, force, dryRun, noVerify, linkInComment bo
 		return fmt.Errorf("post published (URN %s) but writing %s failed: %w", postURN, stateFileName, err)
 	}
 
-	if linkInComment {
-		if _, cerr := commentOnPost(toks.AccessToken, toks.PersonURN, postURN, articleURL); cerr != nil {
-			fmt.Fprintf(os.Stderr, "warning: post created but the link comment failed: %v\n", cerr)
-		} else {
-			fmt.Fprintf(os.Stderr, "added first comment with link: %s\n", articleURL)
-		}
-	}
-
 	if scheduled {
 		fmt.Printf("scheduled %s for %s (URN: %s)\n", slug, formatDateTime(publishAt), postURN)
 	} else {
@@ -272,7 +264,7 @@ func runEdit(root, slug string) error {
 // is the only way to change a published post's article card (e.g. after fixing
 // the page's Open Graph image): editing commentary in place cannot. The new
 // post runs the full preflight and gets a new URN recorded in the state file.
-func runRepublish(root, slug, at string, noVerify, linkInComment bool) error {
+func runRepublish(root, slug, at string, noVerify bool) error {
 	st, err := loadState(root)
 	if err != nil {
 		return err
@@ -297,56 +289,7 @@ func runRepublish(root, slug, at string, noVerify, linkInComment bool) error {
 	fmt.Fprintf(os.Stderr, "deleted old post %s — creating a fresh one...\n", entry.Note)
 
 	// force=true overwrites the stale state entry with the new URN.
-	return runPublish(root, slug, at, true, false, noVerify, linkInComment)
-}
-
-// runComment adds a comment to a post. With text == "" it posts the article URL
-// (the "link in first comment" tactic). Requires the slug to have a recorded URN.
-func runComment(root, slug, text string) error {
-	posts, err := scanPosts(root)
-	if err != nil {
-		return err
-	}
-	var target *post
-	for i := range posts {
-		if posts[i].Slug == slug {
-			target = &posts[i]
-			break
-		}
-	}
-	if target == nil {
-		return fmt.Errorf("no post named %q under %s/", slug, contentPostsDir)
-	}
-
-	st, err := loadState(root)
-	if err != nil {
-		return err
-	}
-	entry, ok := st.Posts[slug]
-	if !ok || entry.Note == "" {
-		return fmt.Errorf("%q has no recorded LinkedIn URN in %s — publish it first", slug, stateFileName)
-	}
-
-	if text == "" {
-		text = fmt.Sprintf("%s/posts/%s/", siteBaseURL(), target.URLSlug)
-	}
-	text = applyMentions(text)
-
-	toks, err := loadTokens()
-	if err != nil {
-		return err
-	}
-	toks, err = ensureFreshTokens(toks)
-	if err != nil {
-		return err
-	}
-
-	commentURN, err := commentOnPost(toks.AccessToken, toks.PersonURN, entry.Note, text)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("commented on %s (comment URN: %s)\n", slug, commentURN)
-	return nil
+	return runPublish(root, slug, at, true, false, noVerify)
 }
 
 func buildPostPayload(commentary, articleURL, title, description, thumbnailURN string, scheduled bool, publishAt time.Time) map[string]any {
