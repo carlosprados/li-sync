@@ -615,27 +615,31 @@ text or refresh its link card.`,
 }
 
 func newXMarkCmd() *cobra.Command {
-	var at, note string
+	var at, id string
 	cmd := &cobra.Command{
 		Use:   "mark <slug>",
 		Short: "Record a post as published on X in x-status.yaml (no API call)",
 		Long: `Record a post as published on X (trust-based, no API call).
 
-For posts you tweeted by hand. Use "x publish" if you want li-sync to tweet
-via the API instead. There is no scheduled state on X.`,
-		Example: "  li-sync x mark cli-built-for-the-ai\n" +
-			"  li-sync x mark cli-built-for-the-ai --at 2026-06-01 --note 1234567890",
+For posts you tweeted by hand (e.g. via "x open"). Use "x publish" if you want
+li-sync to tweet via the API instead. There is no scheduled state on X.
+
+--id accepts the bare tweet ID or the full tweet URL (copy the link from X and
+paste it as-is — the ID is extracted). Recording the ID is what enables
+"x republish" later.`,
+		Example: "  li-sync x mark cli-built-for-the-ai --id https://x.com/cprados/status/1234567890\n" +
+			"  li-sync x mark cli-built-for-the-ai --at 2026-06-01 --id 1234567890",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			root, err := repoRoot()
 			if err != nil {
 				return err
 			}
-			return runXMark(root, args[0], at, note)
+			return runXMark(root, args[0], at, id)
 		},
 	}
 	cmd.Flags().StringVar(&at, "at", "", "datetime (RFC3339 or YYYY-MM-DD[ HH:MM]) when it was tweeted (default: now)")
-	cmd.Flags().StringVar(&note, "note", "", "optional free-form note (e.g. the tweet ID)")
+	cmd.Flags().StringVar(&id, "id", "", "tweet ID or full tweet URL (enables x republish)")
 	return cmd
 }
 

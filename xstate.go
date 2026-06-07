@@ -211,15 +211,39 @@ func runXOpen(root, slug string) error {
 	if err := openURL(intent); err != nil {
 		fmt.Fprintf(os.Stderr, "could not open browser automatically: %v\nopen this URL manually: %s\n", err, intent)
 	}
-	fmt.Fprintln(os.Stderr, "after posting on X, run: li-sync x mark "+slug+" --note <tweet-id>")
+	fmt.Fprintln(os.Stderr, "after posting on X, run: li-sync x mark "+slug+" --id <tweet URL or ID>")
 	return nil
 }
 
 // ---------- x mark / unmark ----------
 
+// parseTweetID extracts the numeric tweet ID from either a bare ID or a full
+// tweet URL (https://x.com/<user>/status/<id>[?query]). The ID is what
+// `x republish` needs to delete the old tweet, so garbage is rejected here
+// rather than discovered at republish time.
+func parseTweetID(s string) (string, error) {
+	id := strings.TrimSpace(s)
+	if _, rest, found := strings.Cut(id, "/status/"); found {
+		id = rest
+		if i := strings.IndexAny(id, "?/"); i >= 0 {
+			id = id[:i]
+		}
+	}
+	if id == "" {
+		return "", fmt.Errorf("no tweet ID in %q", s)
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return "", fmt.Errorf("%q is not a tweet ID or tweet URL (expected a number or .../status/<number>)", s)
+		}
+	}
+	return id, nil
+}
+
 // runXMark records a post as published on X (trust-based, no API call).
-// at optionally backdates the entry; note typically holds the tweet ID.
-func runXMark(root, slug, at, note string) error {
+// at optionally backdates the entry; id is the tweet ID (or full tweet URL),
+// stored in the entry's note field.
+func runXMark(root, slug, at, id string) error {
 	posts, err := scanPosts(root)
 	if err != nil {
 		return err
@@ -243,8 +267,12 @@ func runXMark(root, slug, at, note string) error {
 		}
 		entry.ScheduledFor = t
 	}
-	if note != "" {
-		entry.Note = note
+	if id != "" {
+		tweetID, err := parseTweetID(id)
+		if err != nil {
+			return fmt.Errorf("--id: %w", err)
+		}
+		entry.Note = tweetID
 	}
 
 	s.Posts[slug] = entry
@@ -252,7 +280,11 @@ func runXMark(root, slug, at, note string) error {
 		return err
 	}
 
-	fmt.Printf("marked %s as published on X\n", slug)
+	fmt.Printf("marked %s as published on X", slug)
+	if entry.Note != "" {
+		fmt.Printf(" (tweet ID: %s)", entry.Note)
+	}
+	fmt.Println()
 	return nil
 }
 

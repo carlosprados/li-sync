@@ -285,7 +285,7 @@ li-sync x status [--all]            # posts and their X state
 li-sync x open <slug>               # manual mode: browser composer, tweet pre-filled
 li-sync x publish <slug> [--dry-run | --force | --no-verify]
 li-sync x republish <slug>          # delete the tweet + post a fresh one
-li-sync x mark <slug> [--at <dt>] [--note <tweet-id>]
+li-sync x mark <slug> [--at <dt>] [--id <tweet-url-or-id>]
 li-sync x unmark <slug>
 ```
 
@@ -293,7 +293,7 @@ Like LinkedIn, two modes coexist:
 
 - **Manual mode** (zero setup, zero cost): `x open` opens X's web intent in the
   browser with the tweet text from `x-post.txt` **already filled in** — you just
-  press Post, then record it with `x mark <slug> --note <tweet-id>`. No
+  press Post, then record it with `x mark <slug> --id <tweet-url-or-id>`. No
   developer account, no OAuth, no per-tweet fee.
 - **API mode** (one-time setup, pay-per-use): `x auth` once, then `x publish`
   tweets directly with preflight and automatic state recording.
@@ -447,9 +447,9 @@ state is canonical.
 2. Run `li-sync x status` → see the slug listed as `MISSING`.
 3. Run `li-sync x open <slug>` → browser opens X's composer with the tweet
    from `x-post.txt` already filled in. Press **Post**.
-4. Copy the tweet ID from the posted tweet's URL
-   (`x.com/<user>/status/<tweet-id>`) and run
-   `li-sync x mark <slug> --note <tweet-id>`.
+4. Copy the posted tweet's link (share → Copy link) and run
+   `li-sync x mark <slug> --id <pasted-url>` — the tweet ID is extracted
+   from the URL (a bare ID works too).
 5. Commit `x-status.yaml` in the Hugo repo.
 
 ### X: API mode (after `x auth` is done)
@@ -512,7 +512,7 @@ LinkedIn is now queued. The X row stays `future` — nothing to do yet.
 # Manual (no developer account):
 $ li-sync x open agentic-ai-ch11-goal-setting       # browser opens, tweet pre-filled
 # ... press Post, grab the tweet ID from the URL ...
-$ li-sync x mark agentic-ai-ch11-goal-setting --note 1947231598234177536
+$ li-sync x mark agentic-ai-ch11-goal-setting --id https://x.com/cprados/status/1947231598234177536
 
 # API (after one-time `x auth`):
 $ li-sync x publish agentic-ai-ch11-goal-setting --dry-run

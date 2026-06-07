@@ -113,7 +113,7 @@ func runXPublish(root, slug string, force, dryRun, noVerify bool, baseURL string
 
 	st.Posts[slug] = stateEntry{Status: "published", ScheduledFor: now, Note: tweetID}
 	if err := saveXState(root, st); err != nil {
-		return XPublishResult{}, fmt.Errorf("tweet posted (id %s) but writing %s failed: %w — record it manually with `li-sync x mark %s --note %s`", tweetID, xStateFileName, err, slug, tweetID)
+		return XPublishResult{}, fmt.Errorf("tweet posted (id %s) but writing %s failed: %w — record it manually with `li-sync x mark %s --id %s`", tweetID, xStateFileName, err, slug, tweetID)
 	}
 
 	return XPublishResult{Slug: slug, TweetID: tweetID, Text: text, URL: articleURL}, nil
