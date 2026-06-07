@@ -1,7 +1,8 @@
 # li-sync
 
 Audit which posts of a Hugo blog have been queued or published on LinkedIn and,
-optionally, publish them via the LinkedIn API.
+optionally, publish them via the LinkedIn API. It can also post the companion
+tweet to **X (Twitter)** — see [X (Twitter)](#x-twitter).
 
 Two modes coexist:
 - **Manual mode** (zero setup): you schedule posts in LinkedIn's native composer,
@@ -274,6 +275,79 @@ The text rendered is the name you wrote; the lookup is case-insensitive. An
 unconfigured name is left as plain text with a warning. (You can also write the
 raw `@[Name](urn)` syntax directly — it passes through.)
 
+## X (Twitter)
+
+The `x` command tree mirrors the LinkedIn commands for X:
+
+```
+li-sync x auth                      # one-time OAuth 2.0 + PKCE flow (API mode)
+li-sync x status [--all]            # posts and their X state
+li-sync x open <slug>               # manual mode: browser composer, tweet pre-filled
+li-sync x publish <slug> [--dry-run | --force | --no-verify]
+li-sync x republish <slug>          # delete the tweet + post a fresh one
+li-sync x mark <slug> [--at <dt>] [--note <tweet-id>]
+li-sync x unmark <slug>
+```
+
+Like LinkedIn, two modes coexist:
+
+- **Manual mode** (zero setup, zero cost): `x open` opens X's web intent in the
+  browser with the tweet text from `x-post.txt` **already filled in** — you just
+  press Post, then record it with `x mark <slug> --note <tweet-id>`. No
+  developer account, no OAuth, no per-tweet fee.
+- **API mode** (one-time setup, pay-per-use): `x auth` once, then `x publish`
+  tweets directly with preflight and automatic state recording.
+
+Each post may have an **`x-post.txt`** companion (sibling of
+`linkedin-post.txt`) holding the tweet text, posted **verbatim** — no mention
+expansion (`@handles` are plain text on X). State is tracked in
+**`x-status.yaml`** at the Hugo site root, separate from
+`linkedin-status.yaml`, same schema (status is only ever `published`; the note
+holds the tweet ID).
+
+Key differences from LinkedIn:
+
+- **No scheduling.** The X API v2 cannot schedule tweets (only the UI/Ads API
+  can), so `x publish` **refuses future-dated posts** — run it on/after the
+  post's date. `x status` shows what's due as `MISSING`.
+- **No edit.** The API has no edit endpoint; `x republish` (delete + repost) is
+  the only way to change a published tweet.
+- **No image upload.** X scrapes the link card from the URL in the tweet text
+  (the page's `twitter:card`/`og:` meta), so `x-post.txt` should contain the
+  article URL — `x publish` warns if it doesn't. The same preflight as LinkedIn
+  (page live + reachable `og:image`) runs before tweeting.
+- **280 weighted characters.** URLs count as 23 regardless of length (t.co).
+  `li-sync` pre-checks with an approximation of X's weighting; the API is the
+  final authority.
+
+### Setup for X (one-time)
+
+> **Cost note.** Since February 2026 the X API has no free tier for new
+> developers: the default is pay-per-use at **$0.01 per tweet created**, billed
+> to your developer account. At a weekly cadence this is negligible, but a
+> developer account with billing is required.
+
+1. Create a project + app at https://developer.x.com/en/portal/projects-and-apps.
+2. In the app's **User authentication settings**, enable OAuth 2.0:
+   - **Type of App**: "Web App, Automated App or Bot" (confidential client,
+     recommended — you get a client secret) or "Native App" (public client, no
+     secret; PKCE alone).
+   - **Callback URI**: `http://localhost:8765/callback` (verbatim).
+   - **Website URL**: your blog.
+3. Copy the **OAuth 2.0 Client ID** (and **Client Secret** if confidential)
+   from Keys and tokens.
+4. Run `li-sync x auth` once. Credentials resolve like LinkedIn's:
+   `--client-id`/`--client-secret` flags (saved to `x_app.json`) >
+   `X_CLIENT_ID`/`X_CLIENT_SECRET` env (not saved) > `x_app.json` > interactive
+   prompt. The secret is optional (public clients have none).
+5. A browser tab opens, you grant the scopes (`tweet.read`, `tweet.write`,
+   `users.read`, `offline.access`), and tokens are saved to
+   `$XDG_CONFIG_HOME/li-sync/x_tokens.json` (0600).
+
+Access tokens last ~2 hours; the tool auto-refreshes. X **rotates refresh
+tokens on every refresh** (single-use), so `x_tokens.json` is rewritten each
+time — if a refresh ever fails mid-rotation, re-run `li-sync x auth`.
+
 ## Setup for API mode (one-time)
 
 1. Register an app at https://www.linkedin.com/developers/apps. Standalone app
@@ -367,6 +441,100 @@ For posts already published before adopting this tool: run
 `mark <slug> --published --at <approx date>` once per post. From then on the
 state is canonical.
 
+### X: manual mode (zero setup, zero cost)
+
+1. The post's date arrives and the page is live.
+2. Run `li-sync x status` → see the slug listed as `MISSING`.
+3. Run `li-sync x open <slug>` → browser opens X's composer with the tweet
+   from `x-post.txt` already filled in. Press **Post**.
+4. Copy the tweet ID from the posted tweet's URL
+   (`x.com/<user>/status/<tweet-id>`) and run
+   `li-sync x mark <slug> --note <tweet-id>`.
+5. Commit `x-status.yaml` in the Hugo repo.
+
+### X: API mode (after `x auth` is done)
+
+1. The post's date arrives and the page is live (`x publish` refuses
+   future-dated posts — the API cannot schedule).
+2. Run `li-sync x status` → see the slug listed as `MISSING`.
+3. Run `li-sync x publish <slug> --dry-run` to see the exact tweet and its
+   weighted length.
+4. Run `li-sync x publish <slug>` — preflight, tweet, and `x-status.yaml`
+   updated with the tweet ID automatically.
+5. Commit `x-status.yaml` in the Hugo repo.
+
+## End-to-end example: one post, both networks
+
+The full life of a post, from writing to both networks recorded. Assume a Hugo
+site at `~/blog` and a new post for **2026-07-21**.
+
+**1. Write the post bundle** — three files next to `index.md`:
+
+```
+content/posts/agentic-ai-ch11-goal-setting/
+├── index.md            # the blog post (front-matter date: 2026-07-21)
+├── featured.jpg        # used as the LinkedIn card thumbnail (uploaded via API)
+├── linkedin-post.txt   # LinkedIn companion (≤3000 UTF-16 units)
+└── x-post.txt          # X companion (≤280 weighted chars, URLs count 23)
+```
+
+An `x-post.txt` is short and must **contain the article URL** (that's what X
+renders the link card from):
+
+```
+Agents that drift off-goal are agents you can't ship.
+
+Chapter 11 of my Agentic Design Patterns series: Goal Setting and
+Monitoring — explicit objectives, measurable progress, course correction.
+
+https://carlos.enredando.me/posts/agentic-ai-ch11-goal-setting/
+```
+
+**2. Before the date — LinkedIn can schedule ahead, X cannot:**
+
+```
+$ li-sync status
+agentic-ai-ch11-goal-setting  2026-07-21  MISSING  schedule it in LinkedIn
+
+$ li-sync publish agentic-ai-ch11-goal-setting --dry-run   # sanity-check payload
+$ li-sync publish agentic-ai-ch11-goal-setting
+scheduled agentic-ai-ch11-goal-setting for 2026-07-21 (URN: urn:li:share:7350...)
+
+$ li-sync x status --all
+agentic-ai-ch11-goal-setting  2026-07-21  future   publish on/after 2026-07-21
+```
+
+LinkedIn is now queued. The X row stays `future` — nothing to do yet.
+
+**3. On/after 2026-07-21 — the page is live, post to X.** Pick one mode:
+
+```
+# Manual (no developer account):
+$ li-sync x open agentic-ai-ch11-goal-setting       # browser opens, tweet pre-filled
+# ... press Post, grab the tweet ID from the URL ...
+$ li-sync x mark agentic-ai-ch11-goal-setting --note 1947231598234177536
+
+# API (after one-time `x auth`):
+$ li-sync x publish agentic-ai-ch11-goal-setting --dry-run
+$ li-sync x publish agentic-ai-ch11-goal-setting
+preflight OK: https://carlos.enredando.me/posts/agentic-ai-ch11-goal-setting/ is live, og:image ... reachable
+posted agentic-ai-ch11-goal-setting to X (tweet ID: 1947231598234177536)
+```
+
+**4. Verify and persist the state** — both files live at the Hugo site root and
+are versioned in the blog repo:
+
+```
+$ li-sync status          # → published (after LinkedIn fires the schedule)
+$ li-sync x status        # → published  2026-07-21  // 1947231598234177536
+$ cd ~/blog && git add linkedin-status.yaml x-status.yaml && git commit -m "chore: record ch11 on LinkedIn + X"
+```
+
+**5. (LinkedIn only) add the article link as the first comment by hand** — see
+the note in the LinkedIn workflow above.
+
+Done: one bundle, two networks, all state versioned next to the content.
+
 ## State file
 
 `linkedin-status.yaml` at the Hugo site root. Versioned in the Hugo repo so it
@@ -391,6 +559,8 @@ Edit by hand only if you know what you're doing — easier to use `mark`/`unmark
 | OAuth config/tokens dir    | `LI_SYNC_CONFIG_DIR`                                            | `$XDG_CONFIG_HOME/li-sync/`   |
 | Last repo opened in `tui`  | tool-managed `last_repo` file in the config dir (`tui` only)    | —                             |
 | LinkedIn app credentials   | `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`, or `app.json`   | —                             |
+| X app credentials          | `X_CLIENT_ID`, `X_CLIENT_SECRET`, or `x_app.json`               | —                             |
+| X OAuth tokens             | tool-managed `x_tokens.json` in the config dir                  | —                             |
 
 ## Limitations
 

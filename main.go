@@ -213,15 +213,19 @@ func parseFrontMatter(path string) (frontMatter, error) {
 
 // ---------- state ----------
 
-func statePath(root string) string {
-	return filepath.Join(root, stateFileName)
+// The state serialization is shared between the two platform stores
+// (linkedin-status.yaml and x-status.yaml), which remain SEPARATE files with
+// separate header comments — only the YAML plumbing is common.
+
+func statePathFor(root, name string) string {
+	return filepath.Join(root, name)
 }
 
-func loadState(root string) (state, error) {
+func loadStateFrom(root, name string) (state, error) {
 	var s state
 	s.Posts = map[string]stateEntry{}
 
-	data, err := os.ReadFile(statePath(root))
+	data, err := os.ReadFile(statePathFor(root, name))
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
 	}
@@ -229,7 +233,7 @@ func loadState(root string) (state, error) {
 		return s, err
 	}
 	if err := yaml.Unmarshal(data, &s); err != nil {
-		return s, fmt.Errorf("parse %s: %w", stateFileName, err)
+		return s, fmt.Errorf("parse %s: %w", name, err)
 	}
 	if s.Posts == nil {
 		s.Posts = map[string]stateEntry{}
@@ -237,13 +241,12 @@ func loadState(root string) (state, error) {
 	return s, nil
 }
 
-func saveState(root string, s state) error {
+func saveStateTo(root, name, header string, s state) error {
 	if s.Posts == nil {
 		s.Posts = map[string]stateEntry{}
 	}
 	var buf strings.Builder
-	buf.WriteString("# linkedin-status.yaml — tracks which posts are queued/published on LinkedIn.\n")
-	buf.WriteString("# Managed by li-sync (https://github.com/carlosprados/li-sync). Edit by hand only if you know what you're doing.\n\n")
+	buf.WriteString(header)
 
 	enc := yaml.NewEncoder(&writeAdapter{&buf})
 	enc.SetIndent(2)
@@ -251,7 +254,17 @@ func saveState(root string, s state) error {
 		return err
 	}
 	enc.Close()
-	return os.WriteFile(statePath(root), []byte(buf.String()), 0o644)
+	return os.WriteFile(statePathFor(root, name), []byte(buf.String()), 0o644)
+}
+
+func loadState(root string) (state, error) {
+	return loadStateFrom(root, stateFileName)
+}
+
+func saveState(root string, s state) error {
+	header := "# linkedin-status.yaml — tracks which posts are queued/published on LinkedIn.\n" +
+		"# Managed by li-sync (https://github.com/carlosprados/li-sync). Edit by hand only if you know what you're doing.\n\n"
+	return saveStateTo(root, stateFileName, header, s)
 }
 
 type writeAdapter struct{ b *strings.Builder }

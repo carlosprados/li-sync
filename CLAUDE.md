@@ -6,7 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `li-sync` is a single-binary Go CLI that audits which posts of a Hugo blog have
 been queued/published on LinkedIn, and optionally publishes them via the
-LinkedIn API. It is a **sidecar** that operates on an *external* Hugo repo — it
+LinkedIn API. It also posts companion tweets to **X (Twitter)** via the `x`
+command tree. It is a **sidecar** that operates on an *external* Hugo repo — it
 is not the blog repo itself. Read `README.md` for the full user-facing command
 reference; this file covers what isn't obvious from the source.
 
@@ -39,9 +40,12 @@ The equivalent raw commands still work (`go build -o li-sync .`, `go vet ./...`,
 Tests live alongside the source (`*_test.go`, `package main`) and cover the pure
 logic: `parseFrontMatter`, `parseFlexibleTime`, `classify`, `buildStatusReport`,
 `applyMentions`, `commentaryUTF16Len`, `resolveAuthCredentials` (non-prompt
-branches), state round-trip, and `resolveRepoRoot`. Run with `task test`. The
-HTTP/OAuth paths (`linkedin.go`, `auth.go`'s browser flow) are not unit-tested —
-they'd need an httptest server; add that if you touch them.
+branches), state round-trip, `resolveRepoRoot`, and the X counterparts:
+`tweetLen`, `classifyX`, the `x-status.yaml` round-trip, the PKCE pair (against
+the RFC 7636 Appendix B vector), `buildXAuthorizeURL`, and
+`resolveXAuthCredentials`. Run with `task test`. The HTTP/OAuth paths
+(`linkedin.go`, `twitter.go`, the browser flows) are not unit-tested — they'd
+need an httptest server; add that if you touch them.
 
 Releases are tag-driven: pushing a `v*` tag triggers `.github/workflows/release.yml`,
 which runs GoReleaser (cross-compiles linux/darwin/windows × amd64/arm64). No
@@ -94,20 +98,44 @@ binding):
   `tui` command therefore does NOT fail on a missing repo — it opens the picker.
   `runEdit` returns the URN and `unmarkPost` does the state mutation without
   printing, so the TUI never writes to stdout.
-- **`config.go`** — persistence of app credentials + OAuth tokens to the config dir.
+- **`config.go`** — persistence of app credentials + OAuth tokens to the config
+  dir, for both platforms (`app.json`/`tokens.json` for LinkedIn,
+  `x_app.json`/`x_tokens.json` for X).
+- **`twitter.go`** — X HTTP client: token requests (Basic auth for confidential
+  clients, body `client_id` for public/PKCE ones), `postTweet`, `deleteTweet`,
+  `fetchXUser`, and `ensureFreshXTokens`. All X API constants live here.
+- **`xauth.go`** — the X OAuth 2.0 flow (`runXAuthFlow`): Authorization Code +
+  PKCE (S256; `generateCodeVerifier`/`codeChallengeS256`), reusing auth.go's
+  callback server and CSRF state. `resolveXAuthCredentials` mirrors the
+  LinkedIn precedence but the client secret is optional (public clients).
+- **`xstate.go`** — the X state store (`x-status.yaml` wrappers), the
+  `x-post.txt` companion helpers, `tweetLen` (280 weighted chars, URLs = 23),
+  `classifyX`/`buildXStatusReport` (no scheduled state), `runXMark`/`runXUnmark`,
+  and `runXOpen` (manual mode: X's web intent with the tweet text pre-filled —
+  unlike LinkedIn's composer, the intent accepts the text as a query param, so
+  the manual path needs neither copy/paste nor any API setup).
+- **`xpublish.go`** — `runXPublish`/`runXRepublish`, presentation-free like
+  their LinkedIn counterparts (Reporter + `XPublishResult`). No scheduling: a
+  future-dated post is refused. No mention expansion (X @handles are plain text).
 
-### Two state stores — keep them distinct
+### State stores — keep them distinct
 
-This is the central design point. The tool reads/writes **two unrelated
-locations**:
+This is the central design point. The tool reads/writes **unrelated
+locations** that must never merge:
 
 1. **`linkedin-status.yaml`** — the source of truth for what's been
-   scheduled/published. It lives at the *Hugo site root* (next to `content/`),
-   **versioned in the blog's git repo**, not this one. `mark`/`unmark` are
-   trust-based edits; `publish` updates it automatically on API success.
-2. **`$XDG_CONFIG_HOME/li-sync/`** (override `LI_SYNC_CONFIG_DIR`) — OAuth
-   secrets, never versioned: `app.json` (client id/secret, 0600) and
-   `tokens.json` (access/refresh tokens + person URN, 0600).
+   scheduled/published on LinkedIn. It lives at the *Hugo site root* (next to
+   `content/`), **versioned in the blog's git repo**, not this one.
+   `mark`/`unmark` are trust-based edits; `publish` updates it automatically on
+   API success.
+2. **`x-status.yaml`** — same role and schema for X, also at the Hugo site root
+   and versioned in the blog repo. Status is only ever `published` (X cannot
+   schedule); the note holds the tweet ID. Separate file on purpose — the two
+   platform stores share only the YAML plumbing (`loadStateFrom`/`saveStateTo`
+   in main.go), never a file.
+3. **`$XDG_CONFIG_HOME/li-sync/`** (override `LI_SYNC_CONFIG_DIR`) — OAuth
+   secrets, never versioned: `app.json` + `tokens.json` (LinkedIn) and
+   `x_app.json` + `x_tokens.json` (X), all 0600.
 
 ### Repo discovery (precedence)
 
@@ -119,10 +147,14 @@ need a Hugo repo.
 ### Post model
 
 A "post" is `content/posts/<slug>/index.md` (YAML `---` or TOML `+++` front
-matter; JSON unsupported) plus an optional sibling `linkedin-post.txt`
-companion. The companion's full text becomes the LinkedIn `commentary`. The
-`status` command's `classify` function maps each post to one of:
-`future`/`draft`/`no companion`/`MISSING`/`scheduled`/`published`.
+matter; JSON unsupported) plus optional sibling companions:
+`linkedin-post.txt` (full text becomes the LinkedIn `commentary`, ≤3000 UTF-16
+units) and `x-post.txt` (posted verbatim as the tweet, ≤280 weighted chars,
+URLs count 23). The `status` command's `classify` function maps each post to
+one of: `future`/`draft`/`no companion`/`MISSING`/`scheduled`/`published`;
+`x status`/`classifyX` does the same against `x-status.yaml` minus the
+`scheduled` state. The `post` struct's `HasCompanion` refers to the LinkedIn
+companion — the X report re-derives it from `x-post.txt` (`hasXCompanion`).
 
 ### Publish payload & previews
 
@@ -135,6 +167,26 @@ if past it publishes immediately with a warning. The Posts API does **not** scra
 is `<LISYNC_BASE_URL>/posts/<slug>/` (default `https://carlos.enredando.me`,
 override via `LISYNC_BASE_URL`). `--dry-run` prints the payload with a
 placeholder author URN and needs no auth.
+
+### X specifics
+
+- **OAuth 2.0 + PKCE only** (S256). The client secret is optional: "Native App"
+  type apps are public clients (PKCE alone); "Web App" type are confidential
+  (Basic auth at the token endpoint). `resolveXAuthCredentials` accepts an
+  ID-only credential everywhere; don't reintroduce LinkedIn's both-or-neither
+  rule.
+- **Refresh tokens are single-use** (rotated on every refresh).
+  `ensureFreshXTokens` persists the rotated store BEFORE returning; a persist
+  failure is a hard error — never proceed with an un-persisted rotated token.
+  Access tokens last ~2h.
+- **No scheduling** via the API → `x publish` refuses future-dated posts.
+  **No edit endpoint** → only `x republish` (delete + repost).
+- **No image upload**: X scrapes the link card from the URL in the tweet text
+  (the blog emits `twitter:card` meta), so `x-post.txt` must contain the
+  article URL (warned if absent). The LinkedIn `verifyArticleOG` preflight is
+  reused as-is.
+- `tweetLen` is an approximation of X's weighting (whitespace-tokenized URL
+  detection); the API is the authority and `postTweet` surfaces its errors.
 
 ## Gotchas
 

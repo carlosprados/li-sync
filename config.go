@@ -22,6 +22,18 @@ type tokenStore struct {
 	PersonURN    string    `json:"person_urn"`
 }
 
+// xTokenStore holds the X (Twitter) OAuth 2.0 tokens. X has no URN concept;
+// the numeric user ID and @username identify the authenticated account.
+// X refresh tokens are single-use (rotated on every refresh), so this file is
+// rewritten by ensureFreshXTokens on each rotation.
+type xTokenStore struct {
+	AccessToken  string    `json:"access_token"`
+	RefreshToken string    `json:"refresh_token"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	UserID       string    `json:"user_id"`
+	Username     string    `json:"username"`
+}
+
 func configDir() (string, error) {
 	if d := os.Getenv("LI_SYNC_CONFIG_DIR"); d != "" {
 		return d, nil
@@ -43,7 +55,19 @@ func tokensPath() string {
 	return filepath.Join(d, "tokens.json")
 }
 
-func saveAppCredentials(c appCreds) error {
+func xAppCredsPath() string {
+	d, _ := configDir()
+	return filepath.Join(d, "x_app.json")
+}
+
+func xTokensPath() string {
+	d, _ := configDir()
+	return filepath.Join(d, "x_tokens.json")
+}
+
+// writeConfigJSON marshals v and writes it to a 0600 file in the config dir,
+// creating the dir if needed. Shared by every credential/token save below.
+func writeConfigJSON(path string, v any) error {
 	d, err := configDir()
 	if err != nil {
 		return err
@@ -51,11 +75,60 @@ func saveAppCredentials(c appCreds) error {
 	if err := os.MkdirAll(d, 0o700); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(c, "", "  ")
+	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(appCredsPath(), data, 0o600)
+	return os.WriteFile(path, data, 0o600)
+}
+
+func saveAppCredentials(c appCreds) error {
+	return writeConfigJSON(appCredsPath(), c)
+}
+
+func saveXAppCredentials(c appCreds) error {
+	return writeConfigJSON(xAppCredsPath(), c)
+}
+
+// loadXAppCredentialsFromFile reads x_app.json. Unlike the LinkedIn variant, an
+// empty client_secret is valid: X public clients (PKCE) have no secret.
+func loadXAppCredentialsFromFile() (appCreds, bool, error) {
+	var c appCreds
+	path := xAppCredsPath()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return c, false, nil
+	}
+	if err != nil {
+		return c, false, err
+	}
+	if err := json.Unmarshal(data, &c); err != nil {
+		return c, false, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if c.ClientID == "" {
+		return c, false, fmt.Errorf("%s missing client_id", path)
+	}
+	return c, true, nil
+}
+
+// loadXAppCredentials resolves the X app credentials non-interactively:
+// env vars > x_app.json. Used by token refresh, where prompting is not an option.
+func loadXAppCredentials() (appCreds, error) {
+	var c appCreds
+	c.ClientID = os.Getenv("X_CLIENT_ID")
+	c.ClientSecret = os.Getenv("X_CLIENT_SECRET")
+	if c.ClientID != "" {
+		return c, nil
+	}
+
+	c, ok, err := loadXAppCredentialsFromFile()
+	if err != nil {
+		return c, err
+	}
+	if ok {
+		return c, nil
+	}
+	return c, fmt.Errorf("no X app credentials found.\n  - pass --client-id (and --client-secret for a confidential client) to `li-sync x auth`, or\n  - set X_CLIENT_ID (+ X_CLIENT_SECRET) as env vars, or\n  - create %s with {\"client_id\": \"...\", \"client_secret\": \"...\"} (chmod 0600; secret may be empty for a public client)", xAppCredsPath())
 }
 
 func loadAppCredentialsFromFile() (appCreds, bool, error) {
@@ -96,18 +169,11 @@ func loadAppCredentials() (appCreds, error) {
 }
 
 func saveTokens(t tokenStore) error {
-	d, err := configDir()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(d, 0o700); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(t, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(tokensPath(), data, 0o600)
+	return writeConfigJSON(tokensPath(), t)
+}
+
+func saveXTokens(t xTokenStore) error {
+	return writeConfigJSON(xTokensPath(), t)
 }
 
 // lastRepoPath is a tiny single-line file in the config dir recording the last
@@ -151,6 +217,21 @@ func loadTokens() (tokenStore, error) {
 	}
 	if err := json.Unmarshal(data, &t); err != nil {
 		return t, fmt.Errorf("parse tokens: %w", err)
+	}
+	return t, nil
+}
+
+func loadXTokens() (xTokenStore, error) {
+	var t xTokenStore
+	data, err := os.ReadFile(xTokensPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return t, errors.New("not authenticated with X. run `li-sync x auth` first")
+	}
+	if err != nil {
+		return t, err
+	}
+	if err := json.Unmarshal(data, &t); err != nil {
+		return t, fmt.Errorf("parse X tokens: %w", err)
 	}
 	return t, nil
 }
