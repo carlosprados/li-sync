@@ -54,6 +54,7 @@ stored in $XDG_CONFIG_HOME/li-sync/tokens.json, never in the repo.`,
 		newEditCmd(),
 		newRepublishCmd(),
 		newTUICmd(),
+		newXCmd(),
 	)
 	return root
 }
@@ -73,6 +74,8 @@ func initConfig(root *cobra.Command) {
 	_ = viper.BindEnv("base_url", "LISYNC_BASE_URL")
 	_ = viper.BindEnv("client_id", "LINKEDIN_CLIENT_ID")
 	_ = viper.BindEnv("client_secret", "LINKEDIN_CLIENT_SECRET")
+	_ = viper.BindEnv("x_client_id", "X_CLIENT_ID")
+	_ = viper.BindEnv("x_client_secret", "X_CLIENT_SECRET")
 
 	if dir, err := configDir(); err == nil {
 		viper.AddConfigPath(dir)
@@ -405,4 +408,253 @@ permanently-broken, imageless card. Always run --dry-run first.`,
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "run preflight + print payload, no API call (no auth needed)")
 	cmd.Flags().BoolVar(&noVerify, "no-verify", false, "skip the article/og:image preflight (not recommended)")
 	return cmd
+}
+
+// ---------- x (Twitter) command tree ----------
+
+// printXPublishResult renders an XPublishResult to stdout, mirroring
+// printPublishResult for the X command tree.
+func printXPublishResult(res XPublishResult) {
+	if res.DryRun {
+		fmt.Println("--- tweet (dry run) ---")
+		fmt.Println(res.Text)
+		fmt.Println("--- end tweet ---")
+		fmt.Printf("~%d weighted chars (limit %d) — would post immediately\n", tweetLen(res.Text), tweetMaxWeightedLen)
+		return
+	}
+	fmt.Printf("posted %s to X (tweet ID: %s)\n", res.Slug, res.TweetID)
+}
+
+func newXCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "x",
+		Short: "Publish blog posts to X (Twitter)",
+		Long: `Publish blog posts to X (Twitter).
+
+The X counterpart of the LinkedIn commands. Each post may have an x-post.txt
+companion (sibling of linkedin-post.txt) holding the tweet text, posted
+verbatim. State is tracked in x-status.yaml at the Hugo site root, separate
+from linkedin-status.yaml.
+
+Differences from LinkedIn:
+  - No scheduling: the X API cannot schedule tweets. "x publish" refuses
+    future-dated posts; run it on/after the post's date.
+  - No edit: the X API has no edit endpoint; use "x republish" (delete+repost).
+  - No thumbnail upload: X scrapes the link card from the URL in the tweet
+    text, so x-post.txt should contain the article URL.`,
+	}
+	cmd.AddCommand(
+		newXAuthCmd(),
+		newXStatusCmd(),
+		newXOpenCmd(),
+		newXPublishCmd(),
+		newXRepublishCmd(),
+		newXMarkCmd(),
+		newXUnmarkCmd(),
+	)
+	return cmd
+}
+
+func newXOpenCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "open <slug>",
+		Short: "Open X's composer in the browser with the tweet pre-filled (no API)",
+		Long: `Open X's web intent composer in the browser with the post's x-post.txt
+already filled in — the manual, zero-cost publishing path (no developer
+account, no OAuth, no per-tweet fee).
+
+You just press Post in the browser. Afterwards, record it with:
+  li-sync x mark <slug> --note <tweet-id>
+
+Warns (but still opens) if the text exceeds X's 280 weighted-character limit.`,
+		Example: "  li-sync x open cli-built-for-the-ai",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root, err := repoRoot()
+			if err != nil {
+				return err
+			}
+			return runXOpen(root, args[0])
+		},
+	}
+}
+
+func newXAuthCmd() *cobra.Command {
+	var clientID, clientSecret string
+	cmd := &cobra.Command{
+		Use:   "auth",
+		Short: "One-time X OAuth 2.0 flow (Authorization Code + PKCE)",
+		Long: `One-time X OAuth 2.0 flow so li-sync can tweet on your behalf.
+
+Opens the browser to X's consent page, runs a local callback on
+http://localhost:8765/callback, and saves tokens to
+$XDG_CONFIG_HOME/li-sync/x_tokens.json (0600). Scopes: tweet.read, tweet.write,
+users.read, offline.access. The X app's OAuth 2.0 settings must list
+http://localhost:8765/callback as a Callback URI.
+
+The client secret is optional: public clients ("Native App" type) use PKCE
+alone; confidential clients ("Web App" type) also send the secret. X rotates
+refresh tokens on every refresh — li-sync persists them automatically.
+
+Credential precedence: --client-id/--client-secret flags (saved to x_app.json) >
+X_CLIENT_ID + X_CLIENT_SECRET env / config file > interactive prompt.`,
+		Example: "  li-sync x auth\n  li-sync x auth --client-id abc123",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id := clientID
+			if id == "" {
+				id = viper.GetString("x_client_id")
+			}
+			secret := clientSecret
+			if secret == "" {
+				secret = viper.GetString("x_client_secret")
+			}
+			return runXAuthFlow(id, secret)
+		},
+	}
+	cmd.Flags().StringVar(&clientID, "client-id", "", "X app OAuth 2.0 Client ID (saved to x_app.json)")
+	cmd.Flags().StringVar(&clientSecret, "client-secret", "", "X app OAuth 2.0 Client Secret (optional — public clients have none)")
+	return cmd
+}
+
+func newXStatusCmd() *cobra.Command {
+	var all bool
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "List every post and its X state",
+		Long: `List every post and its X state.
+
+Scans content/posts/, cross-references x-status.yaml, and prints a table
+(SLUG, POST DATE, X STATE, ACTION). States:
+  published     already on X (recorded)
+  MISSING       date has passed, has x-post.txt, not yet on X
+  future        post date is in the future — X cannot schedule (hidden unless --all)
+  draft         draft:true (hidden unless --all)
+  no companion  no x-post.txt (hidden unless --all)`,
+		Example: "  li-sync x status\n  li-sync x status --all",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root, err := repoRoot()
+			if err != nil {
+				return err
+			}
+			return runXStatus(root, all)
+		},
+	}
+	cmd.Flags().BoolVar(&all, "all", false, "show all rows (default hides future, draft, no-companion)")
+	return cmd
+}
+
+func newXPublishCmd() *cobra.Command {
+	var force, dryRun, noVerify bool
+	cmd := &cobra.Command{
+		Use:   "publish <slug>",
+		Short: "Post a post's x-post.txt to X via the API",
+		Long: `Post a post's x-post.txt companion to X via the API.
+
+The companion is posted verbatim (no mention expansion — @handles are plain
+text on X) and must fit X's 280 weighted-character limit (URLs count as 23).
+It should contain the article URL: X scrapes the link card from it (the site's
+twitter:card/og: meta), so no image upload happens.
+
+There is NO scheduling: the X API cannot schedule tweets, so future-dated
+posts are refused — run this on/after the post's date. Requires a completed
+"li-sync x auth". On success, records the tweet ID in x-status.yaml.
+
+Preflight (always on unless --no-verify): refuses to tweet unless the article
+page returns HTTP 200 with a reachable og:image.`,
+		Example: "  li-sync x publish cli-built-for-the-ai --dry-run\n" +
+			"  li-sync x publish cli-built-for-the-ai",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root, err := repoRoot()
+			if err != nil {
+				return err
+			}
+			res, err := runXPublish(root, args[0], force, dryRun, noVerify, siteBaseURL(), cliReporter())
+			if err != nil {
+				return err
+			}
+			printXPublishResult(res)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&force, "force", false, "post even if the slug already has an x-status.yaml entry")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "run checks + print the tweet, no API call (no auth needed)")
+	cmd.Flags().BoolVar(&noVerify, "no-verify", false, "skip the article preflight (not recommended)")
+	return cmd
+}
+
+func newXRepublishCmd() *cobra.Command {
+	var noVerify bool
+	cmd := &cobra.Command{
+		Use:   "republish <slug>",
+		Short: "Delete the existing tweet and post a fresh one",
+		Long: `Delete the existing tweet (by its recorded ID) and post a fresh one from the
+current x-post.txt, recording the new tweet ID.
+
+X has no edit endpoint, so this is the only way to change a published tweet's
+text or refresh its link card.`,
+		Example: "  li-sync x republish cli-built-for-the-ai",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root, err := repoRoot()
+			if err != nil {
+				return err
+			}
+			res, err := runXRepublish(root, args[0], noVerify, siteBaseURL(), cliReporter())
+			if err != nil {
+				return err
+			}
+			printXPublishResult(res)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&noVerify, "no-verify", false, "skip the article preflight (not recommended)")
+	return cmd
+}
+
+func newXMarkCmd() *cobra.Command {
+	var at, note string
+	cmd := &cobra.Command{
+		Use:   "mark <slug>",
+		Short: "Record a post as published on X in x-status.yaml (no API call)",
+		Long: `Record a post as published on X (trust-based, no API call).
+
+For posts you tweeted by hand. Use "x publish" if you want li-sync to tweet
+via the API instead. There is no scheduled state on X.`,
+		Example: "  li-sync x mark cli-built-for-the-ai\n" +
+			"  li-sync x mark cli-built-for-the-ai --at 2026-06-01 --note 1234567890",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root, err := repoRoot()
+			if err != nil {
+				return err
+			}
+			return runXMark(root, args[0], at, note)
+		},
+	}
+	cmd.Flags().StringVar(&at, "at", "", "datetime (RFC3339 or YYYY-MM-DD[ HH:MM]) when it was tweeted (default: now)")
+	cmd.Flags().StringVar(&note, "note", "", "optional free-form note (e.g. the tweet ID)")
+	return cmd
+}
+
+func newXUnmarkCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unmark <slug>",
+		Short: "Remove a post's entry from x-status.yaml",
+		Long: `Remove a post's entry from x-status.yaml, reverting it to not-published.
+
+Use before re-publishing a post whose tweet you deleted, so "x publish" won't
+refuse with "already recorded".`,
+		Example: "  li-sync x unmark cli-built-for-the-ai",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root, err := repoRoot()
+			if err != nil {
+				return err
+			}
+			return runXUnmark(root, args[0])
+		},
+	}
 }
