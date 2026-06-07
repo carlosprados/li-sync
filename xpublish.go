@@ -77,8 +77,10 @@ func runXPublish(root, slug string, force, dryRun, noVerify bool, baseURL string
 	}
 
 	articleURL := fmt.Sprintf("%s/posts/%s/", baseURL, target.URLSlug)
-	if !strings.Contains(text, articleURL) {
-		rep.Stepf("warning: %s does not contain the article URL %s — without it X renders no link card", xCompanionFile, articleURL)
+	// Domain-agnostic check: companions may link through a short domain that
+	// redirects to the canonical one; the card works either way.
+	if !strings.Contains(text, "/posts/"+target.URLSlug+"/") {
+		rep.Stepf("warning: %s does not link the article (no \"/posts/%s/\" URL) — without it X renders no link card", xCompanionFile, target.URLSlug)
 	}
 
 	// Preflight: X scrapes the link card (twitter:card / og: meta) from the
