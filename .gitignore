@@ -39,3 +39,6 @@ go.work.sum
 
 # go-task fingerprint cache
 /.task/
+
+# tmuxp session config (local)
+/.tmuxp.yaml
