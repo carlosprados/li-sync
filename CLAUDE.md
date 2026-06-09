@@ -87,17 +87,28 @@ binding):
 - **`reporter.go`** — the `Reporter` seam: progress steps from long-running ops.
   The CLI binds `writerReporter` to stderr (verbatim with the old output); the
   TUI binds a `chanReporter` that turns each `Stepf` into a `tea.Msg`.
-- **`tui.go`** — the `tui` command's Bubble Tea program (`uiModel`). Read-only
-  browsing plus write actions (publish/edit/republish/unmark) that call the same
-  core funcs behind a `y/n` confirm, run in a `tea.Cmd` goroutine, and stream
-  progress over a channel. Lives in `package main`, not a separate package — the
-  TUI shares the core directly, it doesn't need an extracted boundary. State
-  machine: `modeBrowse → modeConfirm → modeRunning → modeResult`, plus
-  `modePickRepo` (a `bubbles/filepicker` to choose the Hugo root when none is
-  resolved, or via `c`; the pick is validated through `resolveRepoRoot`). The
-  `tui` command therefore does NOT fail on a missing repo — it opens the picker.
-  `runEdit` returns the URN and `unmarkPost` does the state mutation without
-  printing, so the TUI never writes to stdout.
+- **`tui.go`** — the `tui` command's Bubble Tea program (`uiModel`). It is a
+  **dual-platform dashboard**: `reload` builds both `buildStatusReport` and
+  `buildXStatusReport` (each with `all=true`) and merges them by slug into one
+  table with `LINKEDIN` and `X` state columns; a row shows when it's actionable
+  on *either* platform (or everything under `[a]`). Read-only browsing plus write
+  actions that call the same core funcs behind a confirm. Write actions
+  (publish/dry-run/republish/unmark) first open a **platform selector**
+  (`modeSelectPlatform`): checkboxes for LinkedIn and X, each pre-selected when
+  available — availability is per-action (companion present for publish/dry-run;
+  state entry present for republish/unmark). `[e]` edit is LinkedIn-only (X has
+  no edit endpoint) and skips the selector. The chosen platforms run
+  **sequentially over one shared progress channel**, each step prefixed
+  (`prefixReporter`: `[LinkedIn] `/`[X] `); outcomes aggregate independently
+  (`doneMsg.failed`), so one platform failing doesn't abort the other. Lives in
+  `package main`, not a separate package — the TUI shares the core directly, it
+  doesn't need an extracted boundary. State machine:
+  `modeBrowse → modeSelectPlatform → modeConfirm → modeRunning → modeResult`
+  (dry-run skips `modeConfirm`), plus `modePickRepo` (a `bubbles/filepicker` to
+  choose the Hugo root when none is resolved, or via `c`; the pick is validated
+  through `resolveRepoRoot`). The `tui` command therefore does NOT fail on a
+  missing repo — it opens the picker. `runEdit` returns the URN and `unmarkPost`
+  does the state mutation without printing, so the TUI never writes to stdout.
 - **`config.go`** — persistence of app credentials + OAuth tokens to the config
   dir, for both platforms (`app.json`/`tokens.json` for LinkedIn,
   `x_app.json`/`x_tokens.json` for X).

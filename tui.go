@@ -50,6 +50,7 @@ type uiMode int
 
 const (
 	modeBrowse uiMode = iota
+	modeSelectPlatform
 	modeConfirm
 	modeRunning
 	modeResult
@@ -90,6 +91,21 @@ func (a actionKind) destructive() bool {
 type pendingAction struct {
 	kind actionKind
 	slug string
+	li   bool // run on LinkedIn
+	x    bool // run on X
+}
+
+// platforms renders the selected targets, e.g. "LinkedIn + X".
+func (a pendingAction) platforms() string {
+	switch {
+	case a.li && a.x:
+		return "LinkedIn + X"
+	case a.li:
+		return "LinkedIn"
+	case a.x:
+		return "X"
+	}
+	return "nothing"
 }
 
 // Bubble Tea messages for the async write flow.
@@ -98,6 +114,7 @@ type stepsClosedMsg struct{} // the op closed the progress channel
 type doneMsg struct {
 	text   string
 	err    error
+	failed bool // at least one platform's op errored (multi-platform path)
 	reload bool // re-scan the table after a successful state-changing op
 }
 
@@ -109,6 +126,17 @@ func (r chanReporter) Stepf(format string, args ...any) {
 	r.ch <- fmt.Sprintf(format, args...)
 }
 
+// prefixReporter tags every step with a platform marker ("[LinkedIn] " / "[X] ")
+// so a multi-platform run interleaves legibly over the single shared channel.
+type prefixReporter struct {
+	ch     chan string
+	prefix string
+}
+
+func (r prefixReporter) Stepf(format string, args ...any) {
+	r.ch <- r.prefix + fmt.Sprintf(format, args...)
+}
+
 type uiModel struct {
 	root         string
 	baseURL      string
@@ -116,7 +144,12 @@ type uiModel struct {
 	all          bool
 	tbl          table.Model
 	posts        map[string]post
-	report       StatusReport
+	liRows       map[string]row // slug → LinkedIn classification
+	xRows        map[string]row // slug → X classification
+	shown        int            // rows currently in the table
+	liPending    int            // posts MISSING on LinkedIn
+	xPending     int            // posts MISSING on X
+	hidden       int            // rows filtered out when all == false
 	width        int
 	height       int
 	previewLines int
@@ -124,6 +157,10 @@ type uiModel struct {
 
 	mode      uiMode
 	pending   pendingAction
+	selLI     bool // selector: LinkedIn toggled on
+	selX      bool // selector: X toggled on
+	availLI   bool // selector: LinkedIn is a valid target for the pending action
+	availX    bool // selector: X is a valid target for the pending action
 	steps     []string
 	result    string
 	resultErr bool
@@ -138,8 +175,8 @@ func newUIModel(root, baseURL, pickerHint string) (uiModel, error) {
 	cols := []table.Column{
 		{Title: "SLUG", Width: 34},
 		{Title: "DATE", Width: 10},
-		{Title: "STATE", Width: 12},
-		{Title: "ACTION", Width: 26},
+		{Title: "LINKEDIN", Width: 12},
+		{Title: "X", Width: 12},
 	}
 	t := table.New(table.WithColumns(cols), table.WithFocused(true), table.WithHeight(12))
 	s := table.DefaultStyles()
@@ -192,7 +229,16 @@ func (m uiModel) enterPickMode(hint string) (tea.Model, tea.Cmd) {
 	return m, m.picker.Init()
 }
 
-// reload re-scans the repo and the state file and rebuilds the table.
+// hiddenByDefault reports whether a status is filtered out of the actionable
+// view (mirrors buildStatusReport's hideByDefault).
+func hiddenByDefault(s rowStatus) bool {
+	return s == statusFuture || s == statusDraft || s == statusNoCompanion
+}
+
+// reload re-scans the repo and both state files, then rebuilds the dual table.
+// A post is shown in the actionable view if it is visible on EITHER platform;
+// `all` reveals everything. Both reports are built with all=true so every post
+// is classified on both platforms, then merged by slug.
 func (m *uiModel) reload() error {
 	posts, err := scanPosts(m.root)
 	if err != nil {
@@ -202,15 +248,42 @@ func (m *uiModel) reload() error {
 	for _, p := range posts {
 		m.posts[p.Slug] = p
 	}
-	rep, err := buildStatusReport(m.root, m.all, time.Now())
+
+	now := time.Now()
+	liRep, err := buildStatusReport(m.root, true, now)
 	if err != nil {
 		return err
 	}
-	m.report = rep
+	xRep, err := buildXStatusReport(m.root, true, now)
+	if err != nil {
+		return err
+	}
+	m.liRows = make(map[string]row, len(liRep.Rows))
+	for _, r := range liRep.Rows {
+		m.liRows[r.Slug] = r
+	}
+	m.xRows = make(map[string]row, len(xRep.Rows))
+	for _, r := range xRep.Rows {
+		m.xRows[r.Slug] = r
+	}
 
-	rows := make([]table.Row, 0, len(rep.Rows))
-	for _, r := range rep.Rows {
-		rows = append(rows, table.Row{r.Slug, formatDate(r.PostDate), r.Status.label(), r.Action})
+	// liRep (all=true) lists every post in scan order; it is the row spine.
+	m.shown, m.liPending, m.xPending, m.hidden = 0, 0, 0, 0
+	rows := make([]table.Row, 0, len(liRep.Rows))
+	for _, li := range liRep.Rows {
+		x := m.xRows[li.Slug]
+		if li.Status == statusMissing {
+			m.liPending++
+		}
+		if x.Status == statusMissing {
+			m.xPending++
+		}
+		if !m.all && hiddenByDefault(li.Status) && hiddenByDefault(x.Status) {
+			m.hidden++
+			continue
+		}
+		m.shown++
+		rows = append(rows, table.Row{li.Slug, formatDate(li.PostDate), li.Status.label(), x.Status.label()})
 	}
 	m.tbl.SetRows(rows)
 	return nil
@@ -259,12 +332,12 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mode = modeResult
 		if msg.err != nil {
 			m.result, m.resultErr = msg.err.Error(), true
-		} else {
-			m.result, m.resultErr = msg.text, false
-			if msg.reload {
-				if err := m.reload(); err != nil {
-					m.result += "\n(table reload failed: " + err.Error() + ")"
-				}
+			return m, nil
+		}
+		m.result, m.resultErr = msg.text, msg.failed
+		if msg.reload {
+			if err := m.reload(); err != nil {
+				m.result += "\n(table reload failed: " + err.Error() + ")"
 			}
 		}
 		return m, nil
@@ -332,6 +405,33 @@ func (m uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil // other input ignored while an op is in flight
 
+	case modeSelectPlatform:
+		switch key {
+		case "l", "L":
+			if m.availLI {
+				m.selLI = !m.selLI
+			}
+			return m, nil
+		case "x", "X":
+			if m.availX {
+				m.selX = !m.selX
+			}
+			return m, nil
+		case "enter":
+			if !m.selLI && !m.selX {
+				return m, nil // nothing selected — stay
+			}
+			m.pending.li, m.pending.x = m.selLI, m.selX
+			if m.pending.kind == actionDryRun {
+				return m.startAction(m.pending) // dry-run is harmless, skip confirm
+			}
+			m.mode = modeConfirm
+			return m, nil
+		default:
+			m.mode = modeBrowse // n / N / esc / anything cancels
+			return m, nil
+		}
+
 	case modeConfirm:
 		switch key {
 		case "y", "Y":
@@ -358,15 +458,16 @@ func (m uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "c":
 			return m.enterPickMode(m.root)
-		case "d":
+		case "e":
+			// Edit has no X equivalent — LinkedIn only, straight to confirm.
 			if slug, ok := m.selectedSlug(); ok {
-				return m.startAction(pendingAction{kind: actionDryRun, slug: slug})
+				m.pending = pendingAction{kind: actionEdit, slug: slug, li: true}
+				m.mode = modeConfirm
 			}
 			return m, nil
-		case "p", "e", "R", "u":
+		case "d", "p", "R", "u":
 			if slug, ok := m.selectedSlug(); ok {
-				m.pending = pendingAction{kind: keyToAction(key), slug: slug}
-				m.mode = modeConfirm
+				return m.enterSelect(keyToAction(key), slug)
 			}
 			return m, nil
 		}
@@ -389,6 +490,36 @@ func keyToAction(key string) actionKind {
 		return actionUnmark
 	}
 	return actionDryRun
+}
+
+// enterSelect opens the platform checkbox selector for a write action. It
+// derives each platform's availability from that post's classification:
+//   - publish / dry-run: the platform must have a companion (linkedin-post.txt
+//     or x-post.txt), i.e. its status is not "no companion".
+//   - republish / unmark: the platform must already have a state entry
+//     (LinkedIn scheduled/published, X published) — there's nothing to redo or
+//     remove otherwise.
+//
+// Available platforms start pre-selected. If neither is available the key is a
+// no-op (stay in browse).
+func (m uiModel) enterSelect(kind actionKind, slug string) (tea.Model, tea.Cmd) {
+	li := m.liRows[slug]
+	x := m.xRows[slug]
+	switch kind {
+	case actionPublish, actionDryRun:
+		m.availLI = li.Status != statusNoCompanion && li.Status != statusDraft
+		m.availX = x.Status != statusNoCompanion && x.Status != statusDraft
+	case actionRepublish, actionUnmark:
+		m.availLI = li.Status == statusScheduled || li.Status == statusPublished
+		m.availX = x.Status == statusPublished
+	}
+	if !m.availLI && !m.availX {
+		return m, nil // nothing actionable on either platform
+	}
+	m.pending = pendingAction{kind: kind, slug: slug}
+	m.selLI, m.selX = m.availLI, m.availX
+	m.mode = modeSelectPlatform
+	return m, nil
 }
 
 // startAction moves to the running state and launches the op plus the
@@ -414,46 +545,102 @@ func waitForStep(ch chan string) tea.Cmd {
 	}
 }
 
-// runActionCmd runs the selected core operation in a tea.Cmd goroutine, feeding
-// progress through ch and returning a doneMsg. These are the exact same core
-// functions the CLI calls.
+// runActionCmd runs the selected action on each chosen platform sequentially in
+// a tea.Cmd goroutine, feeding progress through ch and returning an aggregated
+// doneMsg. These are the exact same core functions the CLI calls; the X ones
+// are presentation-free counterparts of the LinkedIn ones. Each platform's
+// outcome is collected independently — one failing doesn't abort the other.
 func (m uiModel) runActionCmd(act pendingAction, ch chan string) tea.Cmd {
 	root, baseURL, mentions := m.root, m.baseURL, m.mentions
 	return func() tea.Msg {
-		rep := chanReporter{ch: ch}
 		defer close(ch)
-		switch act.kind {
-		case actionDryRun:
-			res, err := runPublish(root, act.slug, "", true, true, false, baseURL, mentions, rep)
-			if err != nil {
-				return doneMsg{err: err}
-			}
-			return doneMsg{text: dryRunSummary(res)}
-		case actionPublish:
-			res, err := runPublish(root, act.slug, "", false, false, false, baseURL, mentions, rep)
-			if err != nil {
-				return doneMsg{err: err}
-			}
-			return doneMsg{text: publishSummary(res), reload: true}
-		case actionEdit:
-			urn, err := runEdit(root, act.slug, mentions)
-			if err != nil {
-				return doneMsg{err: err}
-			}
-			return doneMsg{text: fmt.Sprintf("edited %s commentary (URN: %s)", act.slug, urn), reload: true}
-		case actionRepublish:
-			res, err := runRepublish(root, act.slug, "", false, baseURL, mentions, rep)
-			if err != nil {
-				return doneMsg{err: err}
-			}
-			return doneMsg{text: publishSummary(res), reload: true}
-		case actionUnmark:
-			if err := unmarkPost(root, act.slug); err != nil {
-				return doneMsg{err: err}
-			}
-			return doneMsg{text: fmt.Sprintf("removed %s from %s", act.slug, stateFileName), reload: true}
+		var parts []string
+		failed, reload := false, false
+		ok := func(s string) { parts = append(parts, uiOkStyle.Render("✓")+" "+s) }
+		bad := func(label string, err error) {
+			parts = append(parts, uiErrStyle.Render("✗")+" "+label+": "+err.Error())
+			failed = true
 		}
-		return doneMsg{err: fmt.Errorf("unknown action")}
+
+		if act.li {
+			rep := prefixReporter{ch: ch, prefix: "[LinkedIn] "}
+			switch act.kind {
+			case actionDryRun:
+				if res, err := runPublish(root, act.slug, "", true, true, false, baseURL, mentions, rep); err != nil {
+					bad("LinkedIn dry-run", err)
+				} else {
+					ok("LinkedIn — " + dryRunSummary(res))
+				}
+			case actionPublish:
+				if res, err := runPublish(root, act.slug, "", false, false, false, baseURL, mentions, rep); err != nil {
+					bad("LinkedIn publish", err)
+				} else {
+					ok("LinkedIn — " + publishSummary(res))
+					reload = true
+				}
+			case actionEdit:
+				if urn, err := runEdit(root, act.slug, mentions); err != nil {
+					bad("LinkedIn edit", err)
+				} else {
+					ok(fmt.Sprintf("LinkedIn — edited %s commentary (URN: %s)", act.slug, urn))
+					reload = true
+				}
+			case actionRepublish:
+				if res, err := runRepublish(root, act.slug, "", false, baseURL, mentions, rep); err != nil {
+					bad("LinkedIn republish", err)
+				} else {
+					ok("LinkedIn — " + publishSummary(res))
+					reload = true
+				}
+			case actionUnmark:
+				if err := unmarkPost(root, act.slug); err != nil {
+					bad("LinkedIn unmark", err)
+				} else {
+					ok(fmt.Sprintf("LinkedIn — removed %s from %s", act.slug, stateFileName))
+					reload = true
+				}
+			}
+		}
+
+		if act.x {
+			rep := prefixReporter{ch: ch, prefix: "[X] "}
+			switch act.kind {
+			case actionDryRun:
+				if res, err := runXPublish(root, act.slug, true, true, false, baseURL, rep); err != nil {
+					bad("X dry-run", err)
+				} else {
+					ok(fmt.Sprintf("X — dry-run OK; would tweet (~%d weighted chars)", tweetLen(res.Text)))
+				}
+			case actionPublish:
+				if res, err := runXPublish(root, act.slug, false, false, false, baseURL, rep); err != nil {
+					bad("X publish", err)
+				} else {
+					ok(fmt.Sprintf("X — tweeted %s (id %s)", res.Slug, res.TweetID))
+					reload = true
+				}
+			case actionRepublish:
+				if res, err := runXRepublish(root, act.slug, false, baseURL, rep); err != nil {
+					bad("X republish", err)
+				} else {
+					ok(fmt.Sprintf("X — tweeted %s (id %s)", res.Slug, res.TweetID))
+					reload = true
+				}
+			case actionUnmark:
+				if err := runXUnmark(root, act.slug); err != nil {
+					bad("X unmark", err)
+				} else {
+					ok(fmt.Sprintf("X — removed %s from %s", act.slug, xStateFileName))
+					reload = true
+				}
+			case actionEdit:
+				bad("X edit", fmt.Errorf("X has no edit endpoint — use republish"))
+			}
+		}
+
+		if len(parts) == 0 {
+			return doneMsg{err: fmt.Errorf("no platform selected")}
+		}
+		return doneMsg{text: strings.Join(parts, "\n\n"), failed: failed, reload: reload}
 	}
 }
 
@@ -501,12 +688,15 @@ func (m uiModel) View() string {
 // browsing, or the confirm/running/result of an action.
 func (m uiModel) bottomContent() string {
 	switch m.mode {
+	case modeSelectPlatform:
+		return m.selectPlatformContent()
 	case modeConfirm:
 		verb := uiTitleBold.Render(m.pending.kind.verb())
 		if m.pending.kind.destructive() {
 			verb = uiWarnStyle.Render(m.pending.kind.verb())
 		}
-		return fmt.Sprintf("%s  →  %s\n\n[y] confirm    [n] cancel", verb, m.pending.slug)
+		return fmt.Sprintf("%s  →  %s\non: %s\n\n[y] confirm    [n] cancel",
+			verb, m.pending.slug, uiTitleBold.Render(m.pending.platforms()))
 	case modeRunning:
 		body := strings.Join(m.steps, "\n")
 		if body == "" {
@@ -524,12 +714,41 @@ func (m uiModel) bottomContent() string {
 	}
 }
 
+// selectPlatformContent renders the platform checkbox selector. Unavailable
+// platforms render as a dimmed "[-]" and cannot be toggled on.
+func (m uiModel) selectPlatformContent() string {
+	verb := uiTitleBold.Render(m.pending.kind.verb())
+	if m.pending.kind.destructive() {
+		verb = uiWarnStyle.Render(m.pending.kind.verb())
+	}
+	line := func(sel, avail bool, name string, st rowStatus) string {
+		switch {
+		case !avail:
+			return uiFooterStyle.Render(fmt.Sprintf("  [-] %-9s %s (unavailable)", name, st.label()))
+		case sel:
+			return fmt.Sprintf("  [%s] %-9s %s", uiOkStyle.Render("✓"), name, st.label())
+		default:
+			return fmt.Sprintf("  [ ] %-9s %s", name, st.label())
+		}
+	}
+	li := m.liRows[m.pending.slug]
+	x := m.xRows[m.pending.slug]
+	body := fmt.Sprintf("%s  →  %s\n\n%s\n%s\n\n[l] toggle LinkedIn   [x] toggle X   [enter] continue   [esc] cancel",
+		verb, m.pending.slug,
+		line(m.selLI, m.availLI, "LinkedIn", li.Status),
+		line(m.selX, m.availX, "X", x.Status),
+	)
+	return body
+}
+
 func (m uiModel) footerText() string {
 	scope := "actionable"
 	if m.all {
 		scope = "all"
 	}
 	switch m.mode {
+	case modeSelectPlatform:
+		return uiFooterStyle.Render("choose targets — [l]/[x] toggle   [enter] continue   [esc] cancel")
 	case modeConfirm:
 		return uiFooterStyle.Render("confirm the action above — [y] yes   [n] no")
 	case modeRunning:
@@ -538,8 +757,8 @@ func (m uiModel) footerText() string {
 		return uiFooterStyle.Render("press any key to return to the table")
 	default:
 		return fmt.Sprintf(
-			"%d shown · %d pending · %d hidden · view:%s\n[↑↓] move · [d]ry-run [p]ublish [e]dit [R]epublish [u]nmark · [a]ll [r]eload [c]hange-repo [q]uit",
-			len(m.report.Rows), m.report.Pending, m.report.Hidden, scope,
+			"%d shown · LI %d pending · X %d pending · %d hidden · view:%s\n[↑↓] move · [d]ry-run [p]ublish [e]dit(LI) [R]epublish [u]nmark · [a]ll [r]eload [c]hange-repo [q]uit",
+			m.shown, m.liPending, m.xPending, m.hidden, scope,
 		)
 	}
 }
@@ -571,24 +790,29 @@ func (m uiModel) previewText() string {
 	if p.Title != "" {
 		b.WriteString(uiTitleBold.Render(p.Title) + "\n")
 	}
-	for _, r := range m.report.Rows {
-		if r.Slug == slug {
-			st := lipgloss.NewStyle().Foreground(stateColor(r.Status)).Render(r.Status.label())
-			fmt.Fprintf(&b, "%s    %s\n", st, formatDate(r.PostDate))
-			break
-		}
-	}
+	li := m.liRows[slug]
+	x := m.xRows[slug]
+	liSt := lipgloss.NewStyle().Foreground(stateColor(li.Status)).Render(li.Status.label())
+	xSt := lipgloss.NewStyle().Foreground(stateColor(x.Status)).Render(x.Status.label())
+	fmt.Fprintf(&b, "LinkedIn: %s    X: %s    %s\n", liSt, xSt, formatDate(p.Date))
 	fmt.Fprintf(&b, "%s/posts/%s/\n", m.baseURL, p.URLSlug)
 
+	// Companion preview: LinkedIn's full text (the longer one), then a one-line
+	// note on whether the X companion exists.
 	if p.HasCompanion {
 		data, err := os.ReadFile(p.CompanionPath)
 		if err != nil {
-			fmt.Fprintf(&b, "\n(could not read companion: %v)", err)
+			fmt.Fprintf(&b, "\n(could not read linkedin-post.txt: %v)", err)
 		} else {
 			b.WriteString("\n" + strings.TrimSpace(string(data)))
 		}
 	} else {
 		b.WriteString("\n(no linkedin-post.txt companion)")
+	}
+	if hasXCompanion(m.root, slug) {
+		b.WriteString("\n\n[x-post.txt present]")
+	} else {
+		b.WriteString("\n\n(no x-post.txt companion)")
 	}
 	return truncateLines(b.String(), m.previewLines)
 }

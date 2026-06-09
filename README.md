@@ -233,8 +233,9 @@ li-sync tui
 ```
 
 Opens an interactive terminal dashboard: a navigable table of every post with
-its LinkedIn state, a live preview of the selected post's companion, and the
-common write actions behind an explicit confirmation.
+both its **LinkedIn and X state** side by side, a live preview of the selected
+post's companion, and the common write actions behind an explicit confirmation.
+A row is shown when it's actionable on *either* platform; `a` reveals everything.
 
 This is an **additive** front-end — it never becomes the only way to do
 anything. Every action it offers calls the *same* core functions as the CLI
@@ -250,13 +251,21 @@ contain `content/posts/` — and rejected inline if not.
 
 Keys:
 - `↑`/`↓` move · `a` toggle all/actionable · `r` reload · `c` change repo · `q` quit
-- `d` dry-run · `p` publish · `e` edit · `R` republish · `u` unmark
+- `d` dry-run · `p` publish · `e` edit (LinkedIn only) · `R` republish · `u` unmark
+- platform selector: `l`/`x` toggle LinkedIn/X · `enter` continue · `esc` cancel
 - picker: `↑`/`↓` move · `enter` choose dir · `h`/`esc` up a level · `ctrl+c` quit
 
-Write actions (`p`/`e`/`R`/`u`) prompt for `y`/`n` confirmation first, then run
-asynchronously with live progress (preflight, thumbnail upload, …) and show the
-result. `d` (dry-run) needs no auth and runs the preflight without posting.
-Scheduling with a custom datetime (`mark --at`, `publish --at`) stays CLI-only.
+Write actions (`p`/`d`/`R`/`u`) first open a **platform selector** — checkboxes
+for LinkedIn and X, each pre-selected when it's a valid target for that post
+(companion present for publish/dry-run; an existing state entry for
+republish/unmark). Pick one or both. Edit (`e`) is LinkedIn-only — X has no edit
+endpoint — and skips the selector. After the selector, the action prompts for
+`y`/`n` confirmation (dry-run skips it), then runs the chosen platforms in
+sequence with live progress (preflight, thumbnail upload, …), each step tagged
+`[LinkedIn]`/`[X]`, and shows a per-platform result — one platform failing
+doesn't abort the other. `d` (dry-run) needs no auth and runs the preflight
+without posting. Scheduling with a custom datetime (`mark --at`, `publish --at`)
+stays CLI-only, as does X's manual `x open` browser path.
 
 ### Mentions
 

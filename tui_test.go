@@ -124,6 +124,62 @@ func TestUIRepoPickerStart(t *testing.T) {
 	}
 }
 
+// A post with both companions exposes both platforms in the selector; toggling
+// X off and confirming carries LinkedIn-only targets through to the action.
+func TestUISelectPlatformDual(t *testing.T) {
+	root := newTestRepo(t, []struct {
+		slug        string
+		date        string
+		draft       bool
+		noCompanion bool
+	}{
+		{slug: "dual-post", date: "2026-01-01"},
+	})
+	// Give it an X companion too — newTestRepo only writes linkedin-post.txt.
+	writeFile(t, filepath.Join(root, "content", "posts", "dual-post", "x-post.txt"),
+		"a tweet https://example.com/posts/dual-post/\n")
+
+	m, err := newUIModel(root, "https://example.com", "")
+	if err != nil {
+		t.Fatalf("newUIModel: %v", err)
+	}
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+
+	// The dual dashboard shows both platform columns.
+	if v := sized.View(); !strings.Contains(v, "LINKEDIN") || !strings.Contains(v, "x-post.txt present") {
+		t.Errorf("dual view missing LINKEDIN column or X companion note:\n%s", v)
+	}
+
+	// "p" opens the selector with BOTH platforms available and pre-selected.
+	picked, _ := sized.Update(key('p'))
+	pm := picked.(uiModel)
+	if pm.mode != modeSelectPlatform {
+		t.Fatalf("after 'p', mode = %v, want modeSelectPlatform", pm.mode)
+	}
+	if !pm.availLI || !pm.availX || !pm.selLI || !pm.selX {
+		t.Fatalf("selector availLI:%v availX:%v selLI:%v selX:%v, want all true",
+			pm.availLI, pm.availX, pm.selLI, pm.selX)
+	}
+
+	// Toggle X off, then confirm — only LinkedIn should carry through.
+	toggled, _ := pm.Update(key('x'))
+	tm := toggled.(uiModel)
+	if tm.selX {
+		t.Errorf("after 'x' toggle, selX = true, want false")
+	}
+	armed, _ := tm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	am := armed.(uiModel)
+	if am.mode != modeConfirm {
+		t.Fatalf("after 'enter', mode = %v, want modeConfirm", am.mode)
+	}
+	if !am.pending.li || am.pending.x {
+		t.Errorf("targets = LI:%v X:%v, want LI only", am.pending.li, am.pending.x)
+	}
+	if !strings.Contains(am.View(), "LinkedIn") {
+		t.Errorf("confirm view should name the LinkedIn target:\n%s", am.View())
+	}
+}
+
 // From the table, "c" reopens the repo picker without losing the model.
 func TestUIChangeRepoKey(t *testing.T) {
 	root := newTestRepo(t, []struct {
@@ -162,14 +218,29 @@ func TestUIConfirmFlow(t *testing.T) {
 	}
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
 
-	// "p" arms a publish confirmation — but does NOT run anything yet.
-	armed, _ := sized.Update(key('p'))
+	// "p" opens the platform selector — it does NOT run or confirm anything yet.
+	picked, _ := sized.Update(key('p'))
+	pm := picked.(uiModel)
+	if pm.mode != modeSelectPlatform {
+		t.Fatalf("after 'p', mode = %v, want modeSelectPlatform", pm.mode)
+	}
+	if pm.pending.kind != actionPublish || pm.pending.slug != "past-missing" {
+		t.Errorf("pending = %+v, want publish/past-missing", pm.pending)
+	}
+	// The test repo has only a LinkedIn companion, so X is unavailable and only
+	// LinkedIn is pre-selected.
+	if !pm.selLI || pm.selX {
+		t.Errorf("selector pre-selection = LI:%v X:%v, want LI only", pm.selLI, pm.selX)
+	}
+
+	// "enter" with a platform selected arms the confirmation — still nothing run.
+	armed, _ := pm.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	am := armed.(uiModel)
 	if am.mode != modeConfirm {
-		t.Fatalf("after 'p', mode = %v, want modeConfirm", am.mode)
+		t.Fatalf("after 'enter', mode = %v, want modeConfirm", am.mode)
 	}
-	if am.pending.kind != actionPublish || am.pending.slug != "past-missing" {
-		t.Errorf("pending = %+v, want publish/past-missing", am.pending)
+	if !am.pending.li || am.pending.x {
+		t.Errorf("confirmed targets = LI:%v X:%v, want LI only", am.pending.li, am.pending.x)
 	}
 	if !strings.Contains(am.View(), "confirm") {
 		t.Errorf("confirm view should prompt for confirmation:\n%s", am.View())
@@ -182,11 +253,16 @@ func TestUIConfirmFlow(t *testing.T) {
 		t.Errorf("after 'n', mode = %v, want modeBrowse", cm.mode)
 	}
 
-	// "d" (dry-run) goes straight to running and returns work to do.
-	running, cmd := cm.Update(key('d'))
+	// "d" (dry-run) opens the selector; "enter" then goes straight to running
+	// (dry-run is harmless, no confirm step) and returns work to do.
+	dpicked, _ := cm.Update(key('d'))
+	if dpicked.(uiModel).mode != modeSelectPlatform {
+		t.Fatalf("after 'd', mode = %v, want modeSelectPlatform", dpicked.(uiModel).mode)
+	}
+	running, cmd := dpicked.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	rm := running.(uiModel)
 	if rm.mode != modeRunning {
-		t.Errorf("after 'd', mode = %v, want modeRunning", rm.mode)
+		t.Errorf("after dry-run 'enter', mode = %v, want modeRunning", rm.mode)
 	}
 	if cmd == nil {
 		t.Error("dry-run should return a command to execute the op")
